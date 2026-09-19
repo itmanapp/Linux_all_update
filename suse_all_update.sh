@@ -207,10 +207,13 @@ done
 
 preserve_logs() {
 
-mkdir -p "$FAIL_LOG_DIR" 2>/dev/null || return 1
+# 在子 shell 中把 umask 設為 077 再建立目錄：目錄從誕生的那一刻就是 700，
+# 不存在「先以寬鬆權限建立、之後才 chmod 收緊」的短暫窗口。
+# 注意這裡不用 `install -d -m 700`：它只把權限套用在最末層，
+# 中間建立的父目錄仍會是 755，而 FAIL_LOG_BASE 正是我們也想收緊的對象。
+( umask 077 && mkdir -p "$FAIL_LOG_DIR" ) 2>/dev/null || return 1
 
-# 收緊權限：log 內含已安裝套件與版本清單（系統指紋資訊），不該讓其他本機使用者讀取。
-# mkdir -p 的權限取決於 umask，這裡明確覆蓋成 700。
+# umask 只影響「新建」的目錄；若目錄是先前執行留下的，這裡補上收緊。
 chmod 700 "$FAIL_LOG_BASE" "$FAIL_LOG_DIR" 2>/dev/null
 
 cp "$LOG_DIR"/*.log "$FAIL_LOG_DIR"/ 2>/dev/null
