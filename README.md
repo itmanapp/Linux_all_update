@@ -60,9 +60,22 @@ curl -fsSL https://raw.githubusercontent.com/itmanapp/Linux_all_update/main/ubun
    - openSUSE Tumbleweed／Slowroll：`zypper dup`（滾動版本需完整升級）
 5. 更新 Flatpak（若已安裝），保留即時下載進度與速率
 6. 更新 Snap（僅 Ubuntu 版；未安裝則略過）
-7. 檢查是否需要重開機、是否有服務需要重啟
+7. 檢查是否需要重開機
+   - Ubuntu：`/run/reboot-required`
+   - openSUSE：`zypper needs-rebooting`（回傳 102 代表建議重開機）＋ `/run/reboot-needed`
 8. 列出已不再需要的套件（僅提示，不會自動移除）
 9. 升級成功時清理套件快取
+
+### 關於 zypper 的資訊性 exit code
+
+`zypper update`／`dup` 在**成功**套用特定 patch 後，可能回傳非 0 的資訊性 exit code（見 `zypper(8)` 的 EXIT CODES）：
+
+| code | 名稱 | 意義 | 腳本處理 |
+|---|---|---|---|
+| 102 | `ZYPPER_EXIT_INF_REBOOT_NEEDED` | 更新成功，但建議重開機 | 視為成功，並在結果中加入重開機建議 |
+| 103 | `ZYPPER_EXIT_INF_RESTART_NEEDED` | 更新成功，但套件管理員本身被更新，需再執行一次 | 視為成功，並提示你再跑一次本腳本 |
+
+（`103` **不是**「服務需要重啟」——那是由 `zypper ps` 判斷的另一件事。）
 
 ## 安全設計
 
