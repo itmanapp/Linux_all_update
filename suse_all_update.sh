@@ -399,10 +399,13 @@ if run_with_progress \
 "$ZYPPER_REFRESH_LOG" \
 sudo LC_ALL=C zypper --non-interactive refresh; then
 
+# 注意參數順序：zypper 的全域選項（--non-interactive）必須在子命令之前，
+# 子命令專屬選項（--auto-agree-with-licenses）必須在子命令之後，
+# 否則會出現 "The flag --auto-agree-with-licenses is not known."。
 if run_with_progress \
     "$UPGRADE_LABEL" \
     "$ZYPPER_UPGRADE_LOG" \
-    sudo LC_ALL=C zypper --non-interactive --auto-agree-with-licenses "$ZYPPER_UPGRADE_CMD"; then
+    sudo LC_ALL=C zypper --non-interactive "$ZYPPER_UPGRADE_CMD" --auto-agree-with-licenses; then
 
     ZYPPER_STATUS="OK"
 else
