@@ -55,6 +55,9 @@ fi
 OS_ID=""
 OS_NAME="unknown"
 
+# 在 subshell（command substitution）中讀取 /etc/os-release：不污染本 shell 環境。
+# 若該檔權限被竄改成可寫，代表系統早已被入侵，不在這支腳本的威脅模型內；
+# 這裡只做欄位取值，不對檔案內容做任何執行以外的處理。
 if [[ -r /etc/os-release ]]; then
 OS_ID="$( . /etc/os-release; echo "${ID:-}" )"
 OS_NAME="$( . /etc/os-release; echo "${PRETTY_NAME:-unknown}" )"
@@ -160,14 +163,44 @@ FAIL_LOG_KEEP=10
 LOG_PRESERVED=false
 
 # 只保留最近幾份失敗 log，避免無限累積
+#
+# 這裡刻意不使用 `ls -1dt ... | while read`：那種寫法在檔名含空白或換行時會解析錯誤。
+# 雖然目錄名稱是腳本自己產生的時間戳，但改用純 bash 內建比較可以完全避開這個脆弱點。
 prune_fail_logs() {
 
 [[ -d "$FAIL_LOG_BASE" ]] || return 0
 
-ls -1dt "$FAIL_LOG_BASE"/*/ 2>/dev/null |
-tail -n +$((FAIL_LOG_KEEP + 1)) |
-while read -r old; do
-    rm -rf "$old"
+local -a dirs=()
+local -a sorted=()
+local d i inserted
+local restore_nullglob=false
+
+shopt -q nullglob && restore_nullglob=true
+shopt -s nullglob
+dirs=( "$FAIL_LOG_BASE"/*/ )
+[[ "$restore_nullglob" == true ]] || shopt -u nullglob
+
+(( ${#dirs[@]} > FAIL_LOG_KEEP )) || return 0
+
+# 用 bash 的 -nt 做插入排序（新 → 舊），完全不解析外部指令的輸出
+for d in "${dirs[@]}"; do
+
+    inserted=false
+
+    for ((i=0; i<${#sorted[@]}; i++)); do
+        if [[ "$d" -nt "${sorted[$i]}" ]]; then
+            sorted=( "${sorted[@]:0:i}" "$d" "${sorted[@]:i}" )
+            inserted=true
+            break
+        fi
+    done
+
+    [[ "$inserted" == true ]] || sorted+=( "$d" )
+done
+
+# 排序後第 FAIL_LOG_KEEP 筆之後的都是較舊的，刪掉
+for ((i=FAIL_LOG_KEEP; i<${#sorted[@]}; i++)); do
+    rm -rf -- "${sorted[$i]}"
 done
 
 }
@@ -175,6 +208,10 @@ done
 preserve_logs() {
 
 mkdir -p "$FAIL_LOG_DIR" 2>/dev/null || return 1
+
+# 收緊權限：log 內含已安裝套件與版本清單（系統指紋資訊），不該讓其他本機使用者讀取。
+# mkdir -p 的權限取決於 umask，這裡明確覆蓋成 700。
+chmod 700 "$FAIL_LOG_BASE" "$FAIL_LOG_DIR" 2>/dev/null
 
 cp "$LOG_DIR"/*.log "$FAIL_LOG_DIR"/ 2>/dev/null
 
@@ -303,6 +340,9 @@ return "$status"
 
 # --------- 檢查 zypper 是否已被其他程序占用 ----------
 # zypper 的鎖是 /var/run/zypp.pid，被占用時直接執行會失敗。
+#
+# 注意：這只是「禮貌性」的提前等待。檢查與實際執行之間存在 check-then-act 競態窗口，
+#       這裡不重複實作鎖定機制，真正的互斥仍由 zypper 自己在底層保證。
 
 zypper_lock_held() {
 
