@@ -69,7 +69,7 @@ curl -fsSL https://raw.githubusercontent.com/itmanapp/Linux_all_update/main/ubun
 - **不做破壞性動作**：不會自動執行 `apt autoremove`／`zypper rm -u`，只在最後提示你自己決定
 - **保留原有設定檔**：Ubuntu 版升級時使用 `--force-confdef --force-confold`，不覆蓋你改過的設定
 - **失敗時保留完整 log**：複製到 `~/.local/share/system-update-logs/<時間戳>/`，最多保留最近 10 份；連 Ctrl+C 中斷也會保留
-- **log 目錄權限收緊為 `700`**：log 內含已安裝套件與版本清單（屬於系統指紋資訊，可用來鎖定已知漏洞版本），明確 `chmod 700` 不依賴系統 umask，其他本機使用者無法讀取
+- **log 目錄權限收緊為 `700`**：log 內含已安裝套件與版本清單（屬於系統指紋資訊，可用來鎖定已知漏洞版本）。目錄是在 `umask 077` 的子 shell 中建立，**從誕生那一刻就是 700**，不存在「先以寬鬆權限建立、之後才補 chmod」的短暫窗口；同時對既有目錄補上 `chmod 700`，即使先前的執行留下寬鬆權限也會被修正。其他本機使用者無法讀取。
 - **不隱藏密碼提示**：sudo 憑證過期時會當著你的面重新詢問，不會把提示寫進 log 讓畫面看起來像當機
 - **結束不關視窗**：在終端機中執行時，結尾會等你按 Enter 才關閉
 
