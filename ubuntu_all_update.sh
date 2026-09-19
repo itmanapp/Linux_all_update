@@ -199,7 +199,8 @@ if [[ "$exit_code" -ne 0 && "$LOG_PRESERVED" != true ]]; then
     fi
 fi
 
-rm -rf "$LOG_DIR"
+# 防禦性檢查：正常情況下 LOG_DIR 已驗證非空，這裡避免任何情況下變成 rm -rf ""
+[[ -n "${LOG_DIR:-}" ]] && rm -rf "$LOG_DIR"
 }
 trap cleanup EXIT
 
