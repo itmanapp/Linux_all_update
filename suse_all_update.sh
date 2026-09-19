@@ -149,6 +149,7 @@ fi
 ZYPPER_REFRESH_LOG="$LOG_DIR/zypper-refresh.log"
 ZYPPER_UPGRADE_LOG="$LOG_DIR/zypper-upgrade.log"
 ZYPPER_VERIFY_LOG="$LOG_DIR/zypper-verify.log"
+ZYPPER_EXIT_FILE="$LOG_DIR/zypper-upgrade.exit"
 FLATPAK_LOG="$LOG_DIR/flatpak.log"
 
 # 若失敗，完整 log 會複製到這裡（不會被 cleanup 刪除）
@@ -238,7 +239,8 @@ if [[ "$exit_code" -ne 0 && "$LOG_PRESERVED" != true ]]; then
     fi
 fi
 
-rm -rf "$LOG_DIR"
+# 防禦性檢查：正常情況下 LOG_DIR 已驗證非空，這裡避免任何情況下變成 rm -rf ""
+[[ -n "${LOG_DIR:-}" ]] && rm -rf "$LOG_DIR"
 }
 trap cleanup EXIT
 
@@ -246,6 +248,10 @@ trap cleanup EXIT
 
 ZYPPER_STATUS="SKIP"
 FLATPAK_STATUS="SKIP"
+
+# zypper 升級階段回報的「資訊性」狀態（更新其實成功，但有後續動作）
+ZYPPER_REBOOT_HINT=false
+ZYPPER_SELF_UPDATED=false
 
 WARNINGS=()
 
@@ -388,6 +394,31 @@ echo
 
 fi
 
+# --------- zypper 升級包裝 ----------
+# zypper update／dup 在「成功」套用特定 patch 後，可能回傳下列非 0 的資訊性 exit code
+# （見 zypper(8) EXIT CODES）：
+#   102 ZYPPER_EXIT_INF_REBOOT_NEEDED  → 更新成功，但建議重開機
+#   103 ZYPPER_EXIT_INF_RESTART_NEEDED → 更新成功，但套件管理員本身被更新，需再執行一次
+# 這些都代表更新成功，直接當成失敗會誤報。
+# run_with_progress 是在背景子 shell 中執行指令，變數無法傳回父 shell，
+# 因此把原始 exit code 寫入檔案，再由父 shell 讀取。
+
+zypper_upgrade() {
+
+sudo LC_ALL=C zypper --non-interactive "$ZYPPER_UPGRADE_CMD" --auto-agree-with-licenses
+
+local rc=$?
+
+echo "$rc" > "$ZYPPER_EXIT_FILE"
+
+case "$rc" in
+    102|103) return 0 ;;
+esac
+
+return "$rc"
+
+}
+
 echo -e "${BOLD}[ Zypper ]${RESET}"
 
 # 升級前的已安裝套件數，供最後統計使用
@@ -405,9 +436,17 @@ sudo LC_ALL=C zypper --non-interactive refresh; then
 if run_with_progress \
     "$UPGRADE_LABEL" \
     "$ZYPPER_UPGRADE_LOG" \
-    sudo LC_ALL=C zypper --non-interactive "$ZYPPER_UPGRADE_CMD" --auto-agree-with-licenses; then
+    zypper_upgrade; then
 
     ZYPPER_STATUS="OK"
+
+    # 讀回 zypper 原始 exit code：102／103 代表更新成功但有後續動作
+    ZYPPER_RC="$(cat "$ZYPPER_EXIT_FILE" 2>/dev/null || echo 0)"
+
+    case "$ZYPPER_RC" in
+        102) ZYPPER_REBOOT_HINT=true ;;
+        103) ZYPPER_SELF_UPDATED=true ;;
+    esac
 else
     ZYPPER_STATUS="FAIL"
     WARNINGS+=("$UPGRADE_LABEL 執行失敗")
@@ -487,17 +526,20 @@ fi
 # ============================================================
 
 REBOOT_REQUIRED=false
-RESTART_REQUIRED=false
 
-# zypper 在需要重開機時回傳 102、需要重啟服務時回傳 103
+# zypper needs-rebooting 只會回兩種結果（見 zypper(8)）：
+#   0   ZYPPER_EXIT_OK                    → 不需要重開機
+#   102 ZYPPER_EXIT_INF_REBOOT_NEEDED     → 建議重開機
+# 它「不會」回 103；103 是 patch／update 在「套件管理員本身被更新、
+# 需要再執行一次」時回傳的，與服務重啟無關。
 if command -v zypper >/dev/null 2>&1; then
 
-zypper needs-rebooting >/dev/null 2>&1
+zypper --quiet needs-rebooting >/dev/null 2>&1
+ZYPPER_NR_RC=$?
 
-case "$?" in
-    102) REBOOT_REQUIRED=true ;;
-    103) RESTART_REQUIRED=true ;;
-esac
+if [[ "$ZYPPER_NR_RC" -eq 102 ]]; then
+REBOOT_REQUIRED=true
+fi
 
 fi
 
@@ -506,12 +548,18 @@ if [[ -f /run/reboot-required || -f /run/reboot-needed ]]; then
 REBOOT_REQUIRED=true
 fi
 
+# 升級階段 zypper 若回傳 102，代表更新成功但建議重開機
+if [[ "$ZYPPER_REBOOT_HINT" == true ]]; then
+REBOOT_REQUIRED=true
+fi
+
 if [[ "$REBOOT_REQUIRED" == true ]]; then
 WARNINGS+=("系統需要重新啟動")
 fi
 
-if [[ "$RESTART_REQUIRED" == true ]]; then
-WARNINGS+=("有服務需要重新啟動（可用 sudo zypper ps -s 查看）")
+# 升級階段 zypper 若回傳 103，代表套件管理員本身已更新，需要再執行一次
+if [[ "$ZYPPER_SELF_UPDATED" == true ]]; then
+WARNINGS+=("套件管理員（zypper／libzypp）本身已更新，請再執行一次本腳本以安裝剩餘更新")
 fi
 
 # --------- 不再需要的套件（orphaned packages）---------
