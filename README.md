@@ -65,6 +65,33 @@ curl -fsSL https://raw.githubusercontent.com/itmanapp/Linux_all_update/main/ubun
    - openSUSE：`zypper needs-rebooting`（回傳 102 代表建議重開機）＋ `/run/reboot-needed`
 8. 列出已不再需要的套件（僅提示，不會自動移除）
 9. 升級成功時清理套件快取
+10. 結束前顯示**本次執行摘要**：列出這次實際跑過的每一個指令、結果與耗時
+
+### 本次執行摘要
+
+腳本結束前會彙整這次到底執行了哪些指令、各自的結果與耗時，例如：
+
+```
+======================================
+           本次執行摘要
+======================================
+
+✅ apt update      成功（2 秒）
+      $ sudo DEBIAN_FRONTEND=noninteractive LC_ALL=C apt update -o Acquire::Retries=3
+✅ apt upgrade     成功（87 秒）
+      $ sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a LC_ALL=C apt upgrade -y ...
+➖ Snap            略過
+      $ sudo snap refresh
+      ↳ 未安裝 snap
+❌ Flatpak         失敗（3 秒）
+      $ flatpak update -y --noninteractive
+      ↳ exit code 1
+======================================
+```
+
+- 每個步驟都顯示**真正執行的完整指令**，不只是「apt upgrade」這種代稱
+- 略過的步驟會說明原因，失敗的步驟會附上 exit code
+- 若中途中斷（Ctrl+C），摘要不會顯示——它是在正常結束流程中印出的
 
 ### 關於 zypper 的資訊性 exit code
 
