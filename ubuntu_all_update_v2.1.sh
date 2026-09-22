@@ -1,11 +1,14 @@
 #!/bin/bash
 # ============================================================
-#  suse_all_update_v2.0.sh
+#  ubuntu_all_update_v2.1.sh
 #
-#  openSUSE / SUSE 系統更新腳本（zypper + flatpak）
+#  Ubuntu / Debian 系統更新腳本（apt + snap + flatpak）
 #
-#  這是 v2.0，與 v1 的 suse_all_update.sh 並存，不會覆蓋它。
-#  變更摘要見 README_v2.0.md。
+#  這是 v2.1，與 v1 的 ubuntu_all_update.sh 並存，不會覆蓋它。
+#  v2.1 修正了 v1 的安全性與正確性問題，並新增命令列選項。
+#  變更摘要見 README_v2.1.md。
+#  v2.1 相對 v2.0 只修兩處：磁碟空間不足時的確認改為 fail-closed、
+#  套件鎖狀態先確認 sudo 憑證後再判定。
 #
 #  請勿以 sudo 執行本腳本。
 # ============================================================
@@ -13,10 +16,10 @@
 set -u
 set -o pipefail
 
-VERSION="2.0"
+VERSION="2.1"
 
 # --------- PATH 強化 ----------
-# 不信任呼叫者的 PATH：把系統目錄放在最前面，避免有人把假的 sudo／zypper
+# 不信任呼叫者的 PATH：把系統目錄放在最前面，避免有人把假的 sudo／apt
 # 放在 PATH 較前面的位置來騙取稍後要輸入的密碼。
 # （sudo 的 secure_path 只保護「sudo 執行的指令」，不保護 sudo 本身。）
 PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH}"
@@ -32,21 +35,22 @@ ASSUME_YES=false
 NO_COLOR="${NO_COLOR:-}"
 KEEP_LOGS=10
 ONLY_RAW=""
-ONLY_ZYPPER=true
+ONLY_APT=true
+ONLY_SNAP=true
 ONLY_FLATPAK=true
 
 usage() {
 cat <<'USAGE'
-suse_all_update_v2.0.sh — openSUSE / SUSE 系統更新腳本
+ubuntu_all_update_v2.1.sh — Ubuntu / Debian 系統更新腳本
 
 用法：
-  ./suse_all_update_v2.0.sh [選項]
+  ./ubuntu_all_update_v2.1.sh [選項]
 
 選項：
   -h, --help          顯示這份說明並結束（不會更新任何東西）
-  -n, --dry-run       只模擬，不實際變更系統（zypper 用 --dry-run、
+  -n, --dry-run       只模擬，不實際變更系統（apt 用 -s、snap 用 --list、
                       flatpak 用 remote-ls --updates）
-      --only LIST     只執行指定項目，逗號分隔：zypper,flatpak,all
+      --only LIST     只執行指定項目，逗號分隔：apt,snap,flatpak,all
                        （預設 all）
   -y, --yes           不等待結尾的「按 Enter」
       --keep-logs N   保留最近 N 份失敗 log（預設 10）
@@ -54,19 +58,15 @@ suse_all_update_v2.0.sh — openSUSE / SUSE 系統更新腳本
       --version       顯示版本並結束
 
 範例：
-  ./suse_all_update_v2.0.sh --dry-run
-  ./suse_all_update_v2.0.sh --only zypper
+  ./ubuntu_all_update_v2.1.sh --dry-run
+  ./ubuntu_all_update_v2.1.sh --only apt
+  ./ubuntu_all_update_v2.1.sh -y --keep-logs 5
 
 結束碼：
   0  全部成功（可能含非致命警告）
-  1  有步驟失敗
+  1  有步驟失敗，或仍有套件被 kept back 而未升級
   2  命令列參數錯誤
   130／143／129  被 Ctrl+C／TERM／HUP 中斷
-
-關於不可變系統（MicroOS／Aeon／Kalpa）：
-  這些系統的根檔案系統是唯讀的，套件更新必須經過
-  transactional-update，更新會落在「新的快照」裡，要重開機才會生效。
-  本腳本會自動偵測並改用 transactional-update dup，且一律提醒你重開機。
 
 注意：
   本腳本會呼叫 sudo，但「請勿」用 sudo 執行整份腳本。
@@ -80,7 +80,7 @@ while [[ $# -gt 0 ]]; do
             exit 0
             ;;
         --version)
-            echo "suse_all_update_v2.0.sh $VERSION"
+            echo "ubuntu_all_update_v2.1.sh $VERSION"
             exit 0
             ;;
         -n|--dry-run)
@@ -125,23 +125,25 @@ if ! [[ "$KEEP_LOGS" =~ ^[0-9]+$ ]]; then
 fi
 
 if [[ -n "$ONLY_RAW" ]]; then
-    ONLY_ZYPPER=false
+    ONLY_APT=false
+    ONLY_SNAP=false
     ONLY_FLATPAK=false
     IFS=',' read -r -a _only_items <<< "$ONLY_RAW"
     for _it in "${_only_items[@]}"; do
         case "$_it" in
-            zypper)  ONLY_ZYPPER=true ;;
+            apt)     ONLY_APT=true ;;
+            snap)    ONLY_SNAP=true ;;
             flatpak) ONLY_FLATPAK=true ;;
-            all)     ONLY_ZYPPER=true; ONLY_FLATPAK=true ;;
+            all)     ONLY_APT=true; ONLY_SNAP=true; ONLY_FLATPAK=true ;;
             "")
                 ;;
             *)
-                echo "錯誤：--only 不認得「$_it」（可用：zypper,flatpak,all）。" >&2
+                echo "錯誤：--only 不認得「$_it」（可用：apt,snap,flatpak,all）。" >&2
                 exit 2
                 ;;
         esac
     done
-    if [[ "$ONLY_ZYPPER" != true && "$ONLY_FLATPAK" != true ]]; then
+    if [[ "$ONLY_APT" != true && "$ONLY_SNAP" != true && "$ONLY_FLATPAK" != true ]]; then
         echo "錯誤：--only 沒有選到任何項目。" >&2
         exit 2
     fi
@@ -172,83 +174,9 @@ fi
 if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
     echo -e "${RED}❌ 請不要用 sudo 或 root 執行這個腳本。${RESET}"
     echo "   腳本會在需要的步驟自行呼叫 sudo；以 root 執行會讓 \$HOME 變成 /root，"
-    echo "   失敗 log 寫到錯誤的位置，flatpak 的使用者層級更新也會失效。"
+    echo "   失敗 log 寫到錯誤的位置，snap／flatpak 的使用者層級更新也會失效。"
     echo "   請改用：./$(basename "$0")"
     exit 1
-fi
-
-# --------- 確認是 SUSE 系系統，並偵測版本 ----------
-
-if ! command -v zypper >/dev/null 2>&1; then
-    echo -e "${RED}❌ 找不到 zypper，這個腳本只能在 openSUSE／SUSE 上執行。${RESET}"
-    echo "   Ubuntu／Debian 請改用 ubuntu_all_update_v2.0.sh"
-    exit 1
-fi
-
-OS_ID=""
-OS_NAME="unknown"
-
-# 在 subshell（command substitution）中讀取 /etc/os-release：不污染本 shell 環境。
-if [[ -r /etc/os-release ]]; then
-    OS_ID="$( . /etc/os-release; echo "${ID:-}" )"
-    OS_NAME="$( . /etc/os-release; echo "${PRETTY_NAME:-unknown}" )"
-fi
-
-# Tumbleweed／Slowroll 等滾動版本要用 dup 才是完整升級；Leap／SLE 用 update
-case "$OS_ID" in
-    opensuse-tumbleweed|opensuse-slowroll)
-        ZYPPER_UPGRADE_CMD="dup"
-        UPGRADE_LABEL="zypper dup"
-        ;;
-    *)
-        ZYPPER_UPGRADE_CMD="update"
-        UPGRADE_LABEL="zypper update"
-        ;;
-esac
-
-# --------- 不可變／交易式系統偵測 ----------
-#
-# v1 把 MicroOS／Aeon／Kalpa 也當成「滾動版本」而直接跑 zypper dup，
-# 這是錯的：這些系統的根檔案系統是唯讀的，zypper 的 dup／update 都帶有
-# NeedsWritableRoot 條件，會改成在「新快照」中執行（或直接以 exit 5 拒絕），
-# 結果是更新不會作用到正在執行的系統，而且 needs-rebooting 也不會回報需要重開機，
-# 使用者因此以為系統已經補好了。
-#
-# 判斷方式參考 zypper 的 isTransactionalSystem()：根目錄唯讀 + 有
-# transactional-update 可用。
-
-IS_TRANSACTIONAL=false
-
-detect_transactional() {
-
-    command -v transactional-update >/dev/null 2>&1 || return 1
-
-    local opts o
-    local -a parts=()
-
-    opts="$(findmnt -no OPTIONS / 2>/dev/null || true)"
-
-    if [[ -n "$opts" ]]; then
-        IFS=',' read -r -a parts <<< "$opts"
-        for o in "${parts[@]}"; do
-            # 精確比對 "ro"，不能用 *ro*（會誤中 errors=remount-ro）
-            [[ "$o" == "ro" ]] && return 0
-        done
-    fi
-
-    # 少數情況根目錄是之後才 remount 成唯讀的，用 ID 補判
-    case "$OS_ID" in
-        opensuse-microos|opensuse-aeon|opensuse-kalpa|opensuse-microos-desktop)
-            return 0
-            ;;
-    esac
-
-    return 1
-}
-
-if detect_transactional; then
-    IS_TRANSACTIONAL=true
-    UPGRADE_LABEL="transactional-update dup"
 fi
 
 # ============================================================
@@ -259,7 +187,7 @@ fi
 #  只會讓「腳本」結束，套件交易仍在以 root 身分進行；而 cleanup 又會
 #  立刻 rm -rf 掉那個程序正在寫入的 log 目錄。
 #
-#  v2.0：追蹤背景子程序，第一次中斷「等它安全結束」，第二次才強制終止，
+#  v2.1：追蹤背景子程序，第一次中斷「等它安全結束」，第二次才強制終止，
 #        而且 cleanup 一定會先確認子程序沒了才刪目錄。
 # ============================================================
 
@@ -276,7 +204,7 @@ signal_exit_code() {
 }
 
 # 等待背景的套件管理程序結束。
-# 套件交易被中途殺掉會留下半殘狀態，所以預設只等待、不強殺。
+# 套件交易被中途殺掉會留下半殘的 dpkg 狀態，所以預設只等待、不強殺。
 reap_child() {
 
     [[ -n "$CHILD_PID" ]] || return 0
@@ -394,10 +322,10 @@ if [[ -z "$LOG_DIR" || ! -d "$LOG_DIR" ]]; then
     exit 1
 fi
 
-ZYPPER_REFRESH_LOG="$LOG_DIR/zypper-refresh.log"
-ZYPPER_UPGRADE_LOG="$LOG_DIR/zypper-upgrade.log"
-ZYPPER_VERIFY_LOG="$LOG_DIR/zypper-verify.log"
-ZYPPER_EXIT_FILE="$LOG_DIR/zypper-upgrade.exit"
+APT_UPDATE_LOG="$LOG_DIR/apt-update.log"
+APT_UPGRADE_LOG="$LOG_DIR/apt-upgrade.log"
+APT_FIX_LOG="$LOG_DIR/apt-fix.log"
+SNAP_LOG="$LOG_DIR/snap.log"
 FLATPAK_LOG="$LOG_DIR/flatpak.log"
 
 FAIL_LOG_BASE="$HOME/.local/share/system-update-logs"
@@ -406,7 +334,7 @@ FAIL_LOG_DIR="$FAIL_LOG_BASE/$(date +%Y%m%d-%H%M%S)-$$"
 LOG_PRESERVED=false
 
 # 只保留最近幾份失敗 log。
-# v2.0：只刪「符合本腳本命名格式」的目錄，且跳過 symlink，
+# v2.1：只刪「符合本腳本命名格式」的目錄，且跳過 symlink，
 #       避免誤刪使用者自己放在同一個目錄下的東西。
 prune_fail_logs() {
 
@@ -414,7 +342,6 @@ prune_fail_logs() {
 
     local -a dirs=()
     local -a sorted=()
-    local -a keep=()
     local d i inserted
     local restore_nullglob=false
 
@@ -423,6 +350,8 @@ prune_fail_logs() {
     dirs=( "$FAIL_LOG_BASE"/*/ )
     [[ "$restore_nullglob" == true ]] || shopt -u nullglob
 
+    # 先過濾：只留下「YYYYmmdd-HHMMSS-PID」這種自己產生的目錄，並排除 symlink
+    local -a keep=()
     for d in "${dirs[@]}"; do
         [[ -L "${d%/}" ]] && continue
         [[ "${d%/}" =~ /[0-9]{8}-[0-9]{6}-[0-9]+$ ]] || continue
@@ -462,7 +391,7 @@ preserve_logs() {
 
     chmod 700 "$FAIL_LOG_BASE" "$FAIL_LOG_DIR" 2>/dev/null
 
-    # v2.0：log 檔本身也收緊為 600，不再只依賴目錄權限；
+    # v2.1：log 檔本身也收緊為 600，不再只依賴目錄權限；
     #       並且檢查 cp 是否真的成功，不再「什麼都沒複製到也回報成功」。
     local copied=0 f
     local restore_nullglob=false
@@ -498,6 +427,7 @@ cleanup() {
     # 絕對不在背景子程序還活著的時候刪掉它正在寫入的目錄
     reap_child
 
+    # 非預期結束（Ctrl+C、被中斷、提早失敗）時也要保留 log
     if [[ "$exit_code" -ne 0 && "$LOG_PRESERVED" != true ]]; then
         if preserve_logs; then
             echo
@@ -515,21 +445,15 @@ trap cleanup EXIT
 #  狀態
 # ============================================================
 
-ZYPPER_STATUS="SKIP"
+APT_STATUS="SKIP"
+SNAP_STATUS="SKIP"
 FLATPAK_STATUS="SKIP"
-
-ZYPPER_REBOOT_HINT=false
-ZYPPER_SELF_UPDATED=false
 
 WARNINGS=()
 
 # ============================================================
 #  進度顯示 + 指令執行
 # ============================================================
-
-# 允許「資訊性」的 exit code 被視為可接受（例如 zypper refresh 的 106）
-TOLERATE_EXIT_CODES=""
-LAST_TOLERATED_RC=0
 
 run_with_progress() {
 
@@ -604,31 +528,16 @@ run_with_progress() {
     if [[ "$status" -eq 0 ]]; then
         echo -e "${GREEN}✓ $title 完成${RESET}"
         record_step "$title" "OK" "$cmd_str" "$((SECONDS - started))"
-        TOLERATE_EXIT_CODES=""
-        return 0
-    fi
-
-    # v2.0：容忍已知的資訊性 exit code
-    if [[ -n "$TOLERATE_EXIT_CODES" && ",$TOLERATE_EXIT_CODES," == *",$status,"* ]]; then
-        LAST_TOLERATED_RC="$status"
-        TOLERATE_EXIT_CODES=""
-        echo -e "${YELLOW}⚠ $title 回報 exit code $status（資訊性狀態，不是失敗）${RESET}"
-        record_step "$title" "WARN" "$cmd_str" "$((SECONDS - started))" "exit code $status（資訊性，非失敗）"
-        return 0
-    fi
-
-    TOLERATE_EXIT_CODES=""
-
-    if [[ "$DRY_RUN" == true ]]; then
-        # 模擬模式的失敗通常只是「非 root 無法讀取套件庫」之類的限制，
+    elif [[ "$DRY_RUN" == true ]]; then
+        # 模擬模式的失敗通常只是「非 root 無法讀取套件清單」之類的限制，
         # 不代表實際更新會失敗，因此記為警告。
         echo -e "${YELLOW}⚠ $title 在模擬模式下未成功（多為非 root 的限制）${RESET}"
         record_step "$title" "WARN" "$cmd_str" "$((SECONDS - started))" "exit code $status（模擬模式）"
-        return "$status"
+    else
+        echo -e "${RED}✗ $title 失敗${RESET}"
+        record_step "$title" "FAIL" "$cmd_str" "$((SECONDS - started))" "exit code $status"
     fi
 
-    echo -e "${RED}✗ $title 失敗${RESET}"
-    record_step "$title" "FAIL" "$cmd_str" "$((SECONDS - started))" "exit code $status"
     return "$status"
 }
 
@@ -638,24 +547,27 @@ run_with_progress() {
 
 echo
 echo -e "${BOLD}======================================${RESET}"
-echo -e "${BOLD}       openSUSE 系統更新開始${RESET}"
+echo -e "${BOLD}       Ubuntu 系統更新開始${RESET}"
 if [[ "$DRY_RUN" == true ]]; then
     echo -e "${BOLD}       （模擬模式，不會變更系統）${RESET}"
 fi
 echo -e "${BOLD}======================================${RESET}"
 echo
-echo -e "${BLUE}▶ 系統：${OS_NAME}${RESET}"
-echo -e "${BLUE}▶ 升級方式：${UPGRADE_LABEL}${RESET}"
 
-if [[ "$IS_TRANSACTIONAL" == true ]]; then
-    echo -e "${YELLOW}▶ 偵測到不可變／交易式系統（根目錄唯讀）${RESET}"
-    echo -e "${YELLOW}  更新會套用到「新的快照」，必須重開機才會生效。${RESET}"
+# 確認 apt／dpkg 存在（v1 沒有檢查，在非 Debian 系會以奇怪的方式失敗）
+if [[ "$ONLY_APT" == true ]]; then
+    for tool in apt-get dpkg; do
+        if ! command -v "$tool" >/dev/null 2>&1; then
+            echo -e "${RED}❌ 找不到 $tool，這不是 Debian 系系統。${RESET}"
+            echo "   openSUSE／SUSE 請改用 suse_all_update_v2.1.sh"
+            exit 1
+        fi
+    done
 fi
 
-echo
-
 # --------- 磁碟空間預檢 ----------
-# 核心套件升級時 /boot 或 / 爆滿，是造成系統半殘最常見的原因之一。
+# 核心套件升級時 /boot 或 / 爆滿，是造成 dpkg 半殘最常見的原因之一。
+# 這裡在「任何變更之前」先檢查，讓使用者有機會直接 Ctrl+C。
 
 check_disk_space() {
 
@@ -679,6 +591,7 @@ DISK_LOW=false
 
 check_disk_space "/" 1024 "/" || DISK_LOW=true
 
+# /boot 只有是獨立掛載點時才需要單獨檢查
 if mountpoint -q /boot 2>/dev/null; then
     check_disk_space "/boot" 256 "/boot" || DISK_LOW=true
 fi
@@ -693,10 +606,18 @@ if [[ "$DISK_LOW" == true ]]; then
 
     echo
     echo -e "${YELLOW}  套件升級期間空間不足，可能讓系統停在半殘狀態。${RESET}"
-    echo -e "${YELLOW}  建議先清出空間（例如 sudo zypper clean、移除舊核心）再執行。${RESET}"
+    echo -e "${YELLOW}  建議先清出空間（例如 sudo apt clean、移除舊核心）再執行。${RESET}"
     echo
 
-    if [[ "$DRY_RUN" != true && "$ASSUME_YES" != true && -t 0 ]]; then
+    # 這裡刻意 fail-closed：無法取得使用者明確同意時一律中止。
+    # 非互動（cron／systemd timer／stdin 被重導向）且沒有 -y 時，舊寫法會因為
+    # -t 0 不成立而「既沒問、也沒擋」，直接在磁碟偏低的狀況下繼續升級。
+    # -y 的語意是「使用者明確同意略過確認」，不是「無法互動時預設同意」。
+    if [[ "$DRY_RUN" == true ]]; then
+        echo -e "${YELLOW}  模擬模式不會變更系統，繼續執行。${RESET}"
+    elif [[ "$ASSUME_YES" == true ]]; then
+        echo -e "${YELLOW}  已指定 -y（明確同意略過確認），繼續執行。${RESET}"
+    elif [[ -t 0 ]]; then
         printf "%b" "${BOLD}仍要繼續嗎？[y/N] ${RESET}"
         read -r _ans || _ans=""
         case "$_ans" in
@@ -706,6 +627,10 @@ if [[ "$DISK_LOW" == true ]]; then
                 exit 1
                 ;;
         esac
+    else
+        echo -e "${RED}❌ 非互動執行且未指定 -y，磁碟空間不足時不予繼續。${RESET}"
+        echo -e "${YELLOW}   若確定要繼續，請加上 -y，或在互動式終端機中執行。${RESET}"
+        exit 1
     fi
 
     echo
@@ -730,78 +655,105 @@ else
 
 fi
 
-# --------- 檢查是否有殘留的 zypper 鎖檔 ----------
-#
-# v2.0：不再建議使用者手動刪鎖檔。zypper 自己會處理殘留的鎖；
-#       而且 PID 可能已被其他程序重用，kill -0 成功也不代表鎖是活的。
+# --------- 修復可能殘留的未完成 dpkg 狀態 ----------
 
-if [[ -e /var/run/zypp.pid ]]; then
+if [[ "$ONLY_APT" == true ]]; then
 
-    ZYPP_PID="$(sudo cat /var/run/zypp.pid 2>/dev/null || true)"
+    echo -e "${BLUE}▶ 檢查並修復未完成的套件設定...${RESET}"
 
-    if [[ "$ZYPP_PID" =~ ^[0-9]+$ ]] && ! sudo kill -0 "$ZYPP_PID" 2>/dev/null; then
-        add_warning "發現疑似殘留的 zypper 鎖檔（PID $ZYPP_PID 已不存在）；通常直接執行 zypper 即可，它會自行處理，不建議手動刪除"
+    if [[ "$DRY_RUN" == true ]]; then
+        echo -e "${CYAN}▶ [模擬] sudo dpkg --configure -a${RESET}"
+        record_step "dpkg configure" "SKIP" "sudo dpkg --configure -a" "0" "模擬模式"
+    elif run_with_progress \
+        "dpkg configure" \
+        "$LOG_DIR/dpkg-configure.log" \
+        sudo DEBIAN_FRONTEND=noninteractive LC_ALL=C dpkg --configure -a; then
+        :
+    else
+        # v2.1：dpkg 處於半殘狀態是「真的問題」，要進 WARNINGS 並影響 exit code，
+        #       不能再像 v1 那樣只印一行「不影響後續更新」就算了。
+        add_warning "dpkg --configure -a 失敗：系統可能有未完成設定的套件，建議手動檢查"
     fi
+
+    echo
 
 fi
 
 # ============================================================
-#  Zypper
+#  APT
 # ============================================================
 
-# --------- 檢查 zypper 是否已被其他程序占用 ----------
+# --------- 檢查套件鎖是否已被其他程序占用 ----------
 #
-# v2.0：區分三種結果。v1 把「鎖是空的」和「sudo 憑證過期／fuser 執行失敗」
+# v2.1：區分三種結果。v1 把「鎖是空的」和「sudo 憑證過期／fuser 執行失敗」
 #       都折成「沒被占用」，會在鎖其實還被持有時印出「鎖已釋放」。
+# v2.1：原本的 case 仍把 sudo -n 的失敗（exit code 1）與 fuser 的
+#       「沒有任何程序持有這個檔案」（也是 exit code 1）混為一談。
+#       現在先單獨確認 sudo 憑證，失敗就直接回報 2（無法判定），
+#       交由外層 ensure_sudo 重新驗證後再判斷。
 
 # 回傳：0 = 被占用　1 = 確定沒被占用　2 = 無法判定
-zypper_lock_state() {
+apt_lock_state() {
 
-    local rc
+    local lockfile rc
 
-    [[ -e /var/run/zypp.pid ]] || return 1
+    # 先單獨確認 sudo 憑證可用：sudo -n 在沒有快取憑證時會以 exit code 1 失敗，
+    # 與 fuser 回報「沒有任何程序持有」的 exit code 1 無法區分。
+    # 不先擋掉的話，「不知道」就會被當成「確定沒鎖」。
+    if ! sudo -n true 2>/dev/null; then
+        return 2
+    fi
 
-    sudo -n fuser -s /var/run/zypp.pid 2>/dev/null
-    rc=$?
+    for lockfile in /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock; do
+        [[ -e "$lockfile" ]] || continue
 
-    case "$rc" in
-        0) return 0 ;;
-        1) return 1 ;;
-        *) return 2 ;;
-    esac
+        sudo -n fuser -s "$lockfile" 2>/dev/null
+        rc=$?
+
+        case "$rc" in
+            0) return 0 ;;   # 有程序持有
+            1) continue ;;   # 這個鎖沒被持有，看下一個
+            *) return 2 ;;   # fuser 執行失敗 → 無法判定
+        esac
+    done
+
+    return 1
 }
 
-if [[ "$ONLY_ZYPPER" == true && "$DRY_RUN" != true ]]; then
+if [[ "$ONLY_APT" == true && "$DRY_RUN" != true ]]; then
 
     if ! command -v fuser >/dev/null 2>&1; then
-        add_warning "找不到 fuser，略過套件鎖檢查（若同時有其他更新在跑，zypper 可能失敗）"
+        add_warning "找不到 fuser，略過套件鎖檢查（若同時有其他更新在跑，apt 可能失敗）"
     else
 
         LOCK_STATE=2
-        zypper_lock_state && LOCK_STATE=0 || LOCK_STATE=$?
+        apt_lock_state && LOCK_STATE=0 || LOCK_STATE=$?
 
         if [[ "$LOCK_STATE" -eq 2 ]]; then
+
             if ensure_sudo; then
-                zypper_lock_state && LOCK_STATE=0 || LOCK_STATE=$?
+                apt_lock_state && LOCK_STATE=0 || LOCK_STATE=$?
             fi
+
         fi
 
         if [[ "$LOCK_STATE" -eq 0 ]]; then
 
-            echo -e "${YELLOW}⚠ 偵測到其他套件管理程序正在執行（zypper／YaST／PackageKit）${RESET}"
+            echo -e "${YELLOW}⚠ 偵測到其他套件管理程序正在執行（可能是 apt-daily.timer／unattended-upgrades）${RESET}"
             echo -e "${BLUE}▶ 等待鎖釋放（最多 5 分鐘）...${RESET}"
 
             LOCK_WAITED=0
 
             while [[ "$LOCK_WAITED" -lt 300 ]]; do
 
+                # 每一輪都重新確認憑證，避免憑證在等待期間過期而誤判「鎖已釋放」
                 if ! ensure_sudo; then
                     add_warning "等待套件鎖時無法取得 sudo 權限，無法確認鎖的狀態"
                     LOCK_STATE=2
                     break
                 fi
 
-                zypper_lock_state
+                apt_lock_state
                 LOCK_STATE=$?
                 [[ "$LOCK_STATE" -eq 1 ]] && break
                 [[ "$LOCK_STATE" -eq 2 ]] && break
@@ -813,8 +765,8 @@ if [[ "$ONLY_ZYPPER" == true && "$DRY_RUN" != true ]]; then
 
             case "$LOCK_STATE" in
                 1) echo -e "${GREEN}✓ 鎖已釋放，繼續執行${RESET}" ;;
-                0) add_warning "等待逾時，套件鎖仍被占用，Zypper 更新可能失敗" ;;
-                2) add_warning "無法判定套件鎖狀態（sudo 或 fuser 失敗），Zypper 更新可能失敗" ;;
+                0) add_warning "等待逾時，套件鎖仍被占用，APT 更新可能失敗" ;;
+                2) add_warning "無法判定套件鎖狀態（sudo 或 fuser 失敗），APT 更新可能失敗" ;;
             esac
 
             echo
@@ -822,191 +774,177 @@ if [[ "$ONLY_ZYPPER" == true && "$DRY_RUN" != true ]]; then
     fi
 fi
 
-# --------- 升級包裝函式 ----------
-#
-# v2.0 修正兩件事：
-#  1. 自己先確認 sudo 憑證。v1 依賴 run_with_progress 的預檢，但那個預檢
-#     只在第一個參數是 "sudo" 時才觸發，而這裡傳入的是包裝函式名稱，
-#     所以整份腳本中最久、最關鍵的特權步驟反而沒有預檢。
-#  2. zypper 的資訊性 exit code 102／103 代表「更新成功，但有後續動作」。
-#     （注意：這兩個碼主要由 patch 交易產生，一般套件更新通常不會出現；
-#       真正可靠的「需要重開機」訊號是 /run/reboot-needed。）
+echo -e "${BOLD}[ APT ]${RESET}"
 
-zypper_upgrade() {
-
-    ensure_sudo || return 1
-
-    sudo LC_ALL=C zypper --non-interactive "$ZYPPER_UPGRADE_CMD" --auto-agree-with-licenses
-
-    local rc=$?
-
-    echo "$rc" > "$ZYPPER_EXIT_FILE"
-
-    case "$rc" in
-        102|103) return 0 ;;
-    esac
-
-    return "$rc"
-}
-
-# 不可變系統：更新會落在新快照，不會作用到正在執行的系統
-transactional_upgrade() {
-
-    ensure_sudo || return 1
-
-    sudo transactional-update dup
-
-    local rc=$?
-
-    echo "$rc" > "$ZYPPER_EXIT_FILE"
-
-    return "$rc"
-}
-
-echo -e "${BOLD}[ Zypper ]${RESET}"
-
-PKG_COUNT_BEFORE="$(rpm -qa 2>/dev/null | wc -l)"
+PKG_COUNT_BEFORE="$(dpkg -l 2>/dev/null | grep -c '^ii' || true)"
 [[ "$PKG_COUNT_BEFORE" =~ ^[0-9]+$ ]] || PKG_COUNT_BEFORE=0
 
-if [[ "$ONLY_ZYPPER" != true ]]; then
+if [[ "$ONLY_APT" != true ]]; then
 
-    ZYPPER_STATUS="SKIP"
-    record_step "Zypper" "SKIP" "" "0" "以 --only 排除"
+    APT_STATUS="SKIP"
+    record_step "APT" "SKIP" "" "0" "以 --only 排除"
 
 else
 
-    # 注意：zypper refresh 沒有 --dry-run，而且它會寫入 /var/cache/zypp，
-    #       所以模擬模式直接略過這一步（見下方）。
-    ZYPPER_REFRESH_CMD=(sudo LC_ALL=C zypper --non-interactive refresh)
-
     if [[ "$DRY_RUN" == true ]]; then
-        ZYPPER_UPGRADE_CMD_ARR=(zypper --non-interactive "$ZYPPER_UPGRADE_CMD" --dry-run)
-        ZYPPER_VERIFY_CMD=(zypper --non-interactive verify --dry-run)
+        APT_UPDATE_CMD=(apt-get -s update)
+        APT_UPGRADE_CMD=(apt-get -s upgrade)
     else
-        ZYPPER_REFRESH_CMD=(sudo LC_ALL=C zypper --non-interactive refresh)
-        ZYPPER_UPGRADE_CMD_ARR=(sudo LC_ALL=C zypper --non-interactive "$ZYPPER_UPGRADE_CMD" --auto-agree-with-licenses)
-        ZYPPER_VERIFY_CMD=(sudo LC_ALL=C zypper --non-interactive verify)
+        APT_UPDATE_CMD=(sudo DEBIAN_FRONTEND=noninteractive LC_ALL=C apt-get update -o Acquire::Retries=3)
+        APT_UPGRADE_CMD=(sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a LC_ALL=C apt-get upgrade -y
+                         -o Dpkg::Options::=--force-confdef
+                         -o Dpkg::Options::=--force-confold
+                         -o Acquire::Retries=3)
     fi
 
-    # --------- refresh ----------
-    #
-    # v2.0：zypper refresh 的 106（ZYPPER_EXIT_INF_REPOS_SKIPPED）是資訊性狀態，
-    #       代表「某些套件庫暫時無法 refresh」。v1 把它當成致命錯誤，
-    #       導致某個第三方 repo 掛掉時「完全不套用任何安全性更新」。
-    #       上游對 update 是容忍的（只有 dup 會 FailIfReposFail），這裡比照辦理。
+    if run_with_progress "apt update" "$APT_UPDATE_LOG" "${APT_UPDATE_CMD[@]}"; then
 
-    if [[ "$ZYPPER_UPGRADE_CMD" == "dup" ]]; then
-        TOLERATE_EXIT_CODES=""
-    else
-        TOLERATE_EXIT_CODES="106"
-    fi
+        if run_with_progress "apt upgrade" "$APT_UPGRADE_LOG" "${APT_UPGRADE_CMD[@]}"; then
 
-    LAST_TOLERATED_RC=0
-    REFRESH_OK=false
-
-    if [[ "$DRY_RUN" == true ]]; then
-
-        echo -e "${CYAN}▶ [模擬] 略過 zypper refresh（refresh 沒有 --dry-run，且會寫入快取）${RESET}"
-        record_step "zypper refresh" "SKIP" "sudo LC_ALL=C zypper --non-interactive refresh" "0" "模擬模式，略過"
-        REFRESH_OK=true
-
-    elif run_with_progress "zypper refresh" "$ZYPPER_REFRESH_LOG" "${ZYPPER_REFRESH_CMD[@]}"; then
-
-        REFRESH_OK=true
-
-        if [[ "$LAST_TOLERATED_RC" -eq 106 ]]; then
-            add_warning "有部分套件庫無法 refresh（zypper 回傳 106），已略過它們繼續更新；請檢查是哪個 repo 出問題"
-        fi
-
-    else
-
-        REFRESH_OK=false
-        ZYPPER_STATUS="FAIL"
-        add_warning "zypper refresh 執行失敗"
-
-    fi
-
-    LAST_TOLERATED_RC=0
-
-    # --------- 升級 ----------
-
-    if [[ "$REFRESH_OK" == true ]]; then
-
-        if [[ "$DRY_RUN" == true ]]; then
-
-            if run_with_progress "$UPGRADE_LABEL（模擬）" "$ZYPPER_UPGRADE_LOG" "${ZYPPER_UPGRADE_CMD_ARR[@]}"; then
-                ZYPPER_STATUS="OK"
-            else
-                ZYPPER_STATUS="SKIP"
-            fi
-
-        elif [[ "$IS_TRANSACTIONAL" == true ]]; then
-
-            if run_with_progress "$UPGRADE_LABEL" "$ZYPPER_UPGRADE_LOG" transactional_upgrade; then
-
-                ZYPPER_STATUS="OK"
-
-                # 不可變系統的更新只會落在新快照，一定要重開機才會生效。
-                # needs-rebooting 不會回報這件事，所以這裡直接強制提示。
-                REBOOT_FORCED=true
-
-            else
-
-                ZYPPER_STATUS="FAIL"
-                add_warning "$UPGRADE_LABEL 執行失敗"
-
-            fi
+            APT_STATUS="OK"
 
         else
 
-            if run_with_progress "$UPGRADE_LABEL" "$ZYPPER_UPGRADE_LOG" zypper_upgrade; then
+            APT_STATUS="FAIL"
+            [[ "$DRY_RUN" == true ]] || add_warning "APT upgrade 執行失敗"
 
-                ZYPPER_STATUS="OK"
+            echo -e "${BLUE}▶ 嘗試修復套件相依（apt-get -f install）...${RESET}"
 
-                ZYPPER_RC="$(cat "$ZYPPER_EXIT_FILE" 2>/dev/null || echo 0)"
-                [[ "$ZYPPER_RC" =~ ^[0-9]+$ ]] || ZYPPER_RC=0
-
-                case "$ZYPPER_RC" in
-                    102) ZYPPER_REBOOT_HINT=true ;;
-                    103) ZYPPER_SELF_UPDATED=true ;;
-                esac
-
+            if [[ "$DRY_RUN" == true ]]; then
+                APT_FIX_CMD=(apt-get -s -f install)
             else
+                APT_FIX_CMD=(sudo DEBIAN_FRONTEND=noninteractive LC_ALL=C apt-get -f install -y
+                             -o Dpkg::Options::=--force-confdef
+                             -o Dpkg::Options::=--force-confold)
+            fi
 
-                ZYPPER_STATUS="FAIL"
-                add_warning "$UPGRADE_LABEL 執行失敗"
-
-                echo -e "${BLUE}▶ 嘗試修復套件相依（zypper verify）...${RESET}"
-
-                if run_with_progress "zypper verify" "$ZYPPER_VERIFY_LOG" "${ZYPPER_VERIFY_CMD[@]}"; then
-                    echo -e "${YELLOW}  已嘗試修復相依，請確認系統狀態${RESET}"
-                else
-                    echo -e "${RED}  修復失敗，建議手動執行：sudo zypper verify${RESET}"
-                    add_warning "zypper verify 修復失敗，系統可能有相依問題"
-                fi
-
+            if run_with_progress "apt fix-broken" "$APT_FIX_LOG" "${APT_FIX_CMD[@]}"; then
+                echo -e "${YELLOW}  已嘗試修復相依，請確認系統狀態${RESET}"
+            else
+                echo -e "${RED}  修復失敗，建議手動執行：sudo apt-get -f install${RESET}"
+                [[ "$DRY_RUN" == true ]] || add_warning "apt-get -f install 修復失敗，系統可能有相依問題"
             fi
         fi
+
+    else
+
+        APT_STATUS="FAIL"
+        [[ "$DRY_RUN" == true ]] || add_warning "APT update 執行失敗"
+
     fi
 
-    PKG_COUNT_AFTER="$(rpm -qa 2>/dev/null | wc -l)"
+    PKG_COUNT_AFTER="$(dpkg -l 2>/dev/null | grep -c '^ii' || true)"
     [[ "$PKG_COUNT_AFTER" =~ ^[0-9]+$ ]] || PKG_COUNT_AFTER="$PKG_COUNT_BEFORE"
 
-    # --------- 檢查 zypper 的 Error（v2.0：不再把每個 Warning 都當成問題） ----------
+    # --------- v2.1：偵測「有套件沒有真的被升級」 ----------
+    # v1 只 grep '^(W:|E:)'，但 apt upgrade 在有套件被 kept back 或
+    # 因 phased update 而延後時，exit code 仍是 0，輸出也不含 W:/E:。
+    # 這會讓腳本在系統其實沒補齊的狀態下回報「全部完成」。
+
+    APT_NOT_UPGRADED=0
+    APT_KEPT_BACK=false
+    APT_PHASED=false
+
+    if [[ "$DRY_RUN" != true && -r "$APT_UPGRADE_LOG" ]]; then
+
+        _n="$(sed -n 's/.*and \([0-9][0-9]*\) not upgraded.*/\1/p' "$APT_UPGRADE_LOG" | tail -n1)"
+        [[ "$_n" =~ ^[0-9]+$ ]] && APT_NOT_UPGRADED="$_n"
+
+        grep -q 'have been kept back' "$APT_UPGRADE_LOG" 2>/dev/null && APT_KEPT_BACK=true
+        grep -q 'deferred due to phasing' "$APT_UPGRADE_LOG" 2>/dev/null && APT_PHASED=true
+    fi
+
+    # 套件名稱（最多列 20 個），讓使用者知道到底是哪些沒升到
+    apt_pending_names() {
+        awk '
+            /^The following packages have been kept back:/          { grab=1; next }
+            /^The following upgrades have been deferred due to phasing:/ { grab=1; next }
+            grab && /^[[:space:]]/ {
+                gsub(/^[[:space:]]+/, "")
+                n = split($0, a, /[[:space:]]+/)
+                for (i = 1; i <= n; i++) if (a[i] != "") print a[i]
+                next
+            }
+            grab { grab = 0 }
+        ' "$1" 2>/dev/null | sort -u | head -n 20 | paste -sd' ' -
+    }
+
+    if [[ "$APT_KEPT_BACK" == true ]]; then
+
+        # kept back 代表「有相依變更而 apt upgrade 刻意不動它」，
+        # 這通常需要 apt full-upgrade，是使用者真正該知道的事。
+        _names="$(apt_pending_names "$APT_UPGRADE_LOG")"
+        APT_STATUS="PARTIAL"
+        add_warning "有 ${APT_NOT_UPGRADED} 個套件被 kept back 而未升級${_names:+：$_names}"
+        add_warning "若確認要一併升級這些套件，請執行：sudo apt full-upgrade"
+
+    elif [[ "$APT_PHASED" == true ]]; then
+
+        # phased update 是 Ubuntu 刻意的分批推送，會自行陸續生效，
+        # 不是錯誤，但也不該讓使用者以為「全部都補完了」。
+        _names="$(apt_pending_names "$APT_UPGRADE_LOG")"
+        add_warning "有 ${APT_NOT_UPGRADED} 個套件因 phased update 分批推送而暫緩升級${_names:+：$_names}（Ubuntu 會自行陸續生效）"
+
+    elif [[ "$APT_NOT_UPGRADED" -gt 0 ]]; then
+
+        add_warning "有 ${APT_NOT_UPGRADED} 個套件未被升級，建議檢查 $APT_UPGRADE_LOG"
+
+    fi
+
+    # --------- 檢查 APT 的 Error（v2.1：不再把每個 W: 都當成問題） ----------
+    # v1 的 '^(W:|E:)' 幾乎每次執行都會命中無害的警告
+    # （例如 "W: Key is stored in legacy trusted.gpg keyring"），
+    # 讓使用者對警告區塊麻木。
 
     if [[ "$DRY_RUN" == true ]]; then
         :   # 模擬模式的 log 內容不代表真實結果，不做警告判定
-    elif grep -Eq '^(Error):|^Problem:' "$ZYPPER_REFRESH_LOG" "$ZYPPER_UPGRADE_LOG" 2>/dev/null; then
-        add_warning "zypper log 中有 Error，建議檢查詳細資訊"
-    elif grep -Eq '^Warning:' "$ZYPPER_REFRESH_LOG" "$ZYPPER_UPGRADE_LOG" 2>/dev/null; then
-        _wcount="$(cat "$ZYPPER_REFRESH_LOG" "$ZYPPER_UPGRADE_LOG" 2>/dev/null | grep -cE '^Warning:' || true)"
+    elif grep -Eq '^(E:)|^dpkg: error' "$APT_UPDATE_LOG" "$APT_UPGRADE_LOG" 2>/dev/null; then
+        add_warning "APT log 中有 Error，建議檢查詳細資訊"
+    elif grep -Eq '^W:' "$APT_UPDATE_LOG" "$APT_UPGRADE_LOG" 2>/dev/null; then
+        _wcount="$(cat "$APT_UPDATE_LOG" "$APT_UPGRADE_LOG" 2>/dev/null | grep -cE '^W:' || true)"
         [[ "$_wcount" =~ ^[0-9]+$ ]] || _wcount=0
-        add_warning "zypper log 中有 ${_wcount} 則警告（需要時再看 log）"
+        add_warning "APT log 中有 ${_wcount} 則警告（多為無害，需要時再看 log）"
     fi
 
     echo
 
 fi
+
+# ============================================================
+#  Snap
+# ============================================================
+
+echo -e "${BOLD}[ Snap ]${RESET}"
+
+if [[ "$ONLY_SNAP" != true ]]; then
+
+    SNAP_STATUS="SKIP"
+    record_step "Snap" "SKIP" "" "0" "以 --only 排除"
+
+elif ! command -v snap >/dev/null 2>&1; then
+
+    SNAP_STATUS="NOT_INSTALLED"
+    echo -e "${YELLOW}➖ Snap 未安裝，略過${RESET}"
+    record_step "Snap" "SKIP" "sudo snap refresh" "0" "未安裝 snap"
+
+else
+
+    if [[ "$DRY_RUN" == true ]]; then
+        SNAP_CMD=(snap refresh --list)
+    else
+        SNAP_CMD=(sudo snap refresh)
+    fi
+
+    if run_with_progress "Snap" "$SNAP_LOG" "${SNAP_CMD[@]}"; then
+        SNAP_STATUS="OK"
+    else
+        SNAP_STATUS="FAIL"
+        add_warning "Snap 更新失敗"
+    fi
+
+fi
+
+echo
 
 # ============================================================
 #  Flatpak
@@ -1068,55 +1006,26 @@ fi
 # ============================================================
 
 REBOOT_REQUIRED=false
-REBOOT_FORCED="${REBOOT_FORCED:-false}"
 
-# zypper needs-rebooting 不需要 root（它只是檢查 /run/reboot-needed 是否存在，
-# 而 libzypp 在非 root 時會直接跳過鎖的取得）。
-# v2.0：不再丟棄非 0／102 的結果，才不會把「檢查失敗」誤認為「不需要重開機」。
-if command -v zypper >/dev/null 2>&1; then
-
-    zypper --quiet needs-rebooting >/dev/null 2>&1
-    ZYPPER_NR_RC=$?
-
-    case "$ZYPPER_NR_RC" in
-        0)   ;;
-        102) REBOOT_REQUIRED=true ;;
-        *)   add_warning "zypper needs-rebooting 回傳非預期狀態 $ZYPPER_NR_RC，無法確認是否需要重開機" ;;
-    esac
-
-fi
-
-# 部分版本／工具會在 /run 下留標記檔
-if [[ -f /run/reboot-required || -f /run/reboot-needed ]]; then
+if [[ -f /run/reboot-required ]]; then
     REBOOT_REQUIRED=true
-fi
-
-if [[ "$ZYPPER_REBOOT_HINT" == true ]]; then
-    REBOOT_REQUIRED=true
-fi
-
-if [[ "$REBOOT_REQUIRED" == true ]]; then
     add_warning "系統需要重新啟動"
 fi
 
-if [[ "$ZYPPER_SELF_UPDATED" == true ]]; then
-    add_warning "套件管理員（zypper／libzypp）本身已更新，請再執行一次本腳本以安裝剩餘更新"
-fi
+# --------- apt autoremove ----------
 
-# --------- 不再需要的套件（orphaned packages）---------
+AUTOREMOVE_COUNT=0
 
-UNNEEDED_COUNT=0
+if command -v apt-get >/dev/null 2>&1; then
 
-if command -v zypper >/dev/null 2>&1; then
-
-    UNNEEDED_COUNT="$(
-        LC_ALL=C zypper --quiet packages --unneeded 2>/dev/null |
-        awk '/ \| / { if (seen++) count++ } END { print count+0 }'
+    AUTOREMOVE_COUNT="$(
+        LC_ALL=C apt-get -s autoremove 2>/dev/null |
+        awk '/^Remv / {count++} END {print count+0}'
     )"
-    [[ "$UNNEEDED_COUNT" =~ ^[0-9]+$ ]] || UNNEEDED_COUNT=0
+    [[ "$AUTOREMOVE_COUNT" =~ ^[0-9]+$ ]] || AUTOREMOVE_COUNT=0
 
-    if [[ "$UNNEEDED_COUNT" -gt 0 ]]; then
-        add_warning "有 $UNNEEDED_COUNT 個套件已不再需要，可用 sudo zypper rm -u 移除"
+    if [[ "$AUTOREMOVE_COUNT" -gt 0 ]]; then
+        add_warning "有 $AUTOREMOVE_COUNT 個套件可以使用 apt autoremove 移除"
     fi
 
 fi
@@ -1206,7 +1115,8 @@ print_run_summary() {
 # 模擬模式的「失敗」多半只是非 root 的限制，不該讓 exit code 變成 1
 if [[ "$DRY_RUN" == true ]]; then
     HAD_FAILURE=false
-    [[ "$ZYPPER_STATUS" == "FAIL" ]] && ZYPPER_STATUS="SKIP"
+    [[ "$APT_STATUS" == "FAIL" ]] && APT_STATUS="SKIP"
+    [[ "$SNAP_STATUS" == "FAIL" ]] && SNAP_STATUS="SKIP"
     [[ "$FLATPAK_STATUS" == "FAIL" ]] && FLATPAK_STATUS="SKIP"
 fi
 
@@ -1215,12 +1125,13 @@ echo -e "${BOLD}======================================${RESET}"
 echo -e "${BOLD}             更新結果${RESET}"
 echo -e "${BOLD}======================================${RESET}"
 
-print_status "Zypper" "$ZYPPER_STATUS"
+print_status "APT" "$APT_STATUS"
+print_status "Snap" "$SNAP_STATUS"
 print_status "Flatpak" "$FLATPAK_STATUS"
 
 echo -e "${BOLD}======================================${RESET}"
 
-if [[ "$ZYPPER_STATUS" == "OK" || "$ZYPPER_STATUS" == "PARTIAL" ]]; then
+if [[ "$APT_STATUS" == "OK" || "$APT_STATUS" == "PARTIAL" ]]; then
     PKG_DIFF=$(( PKG_COUNT_AFTER - PKG_COUNT_BEFORE ))
     if [[ "$PKG_DIFF" -gt 0 ]]; then
         PKG_DIFF_STR="+$PKG_DIFF"
@@ -1248,34 +1159,26 @@ fi
 
 # --------- reboot ----------
 
-if [[ "$REBOOT_FORCED" == true ]]; then
-
-    echo
-    echo -e "${YELLOW}${BOLD}🔄 必須重新啟動系統（更新已套用到新快照）：${RESET}"
-    echo "   sudo reboot"
-    echo -e "${YELLOW}   在重開機之前，正在執行的系統仍然維持舊的套件版本。${RESET}"
-
-elif [[ "$REBOOT_REQUIRED" == true ]]; then
-
+if [[ "$REBOOT_REQUIRED" == true ]]; then
     echo
     echo -e "${YELLOW}${BOLD}🔄 建議重新啟動系統：${RESET}"
     echo "   sudo reboot"
-
 fi
 
-# --------- 不再需要的套件 ----------
+# --------- autoremove ----------
 
-if [[ "$UNNEEDED_COUNT" -gt 0 ]]; then
+if [[ "$AUTOREMOVE_COUNT" -gt 0 ]]; then
     echo
     echo -e "${YELLOW}${BOLD}🧹 可以清除不再需要的套件：${RESET}"
-    echo "   sudo zypper rm -u"
+    echo "   sudo apt autoremove"
 fi
 
 # ============================================================
 #  失敗時顯示 log 並保留完整檔案
 # ============================================================
 
-if [[ "$ZYPPER_STATUS" == "FAIL" ||
+if [[ "$APT_STATUS" == "FAIL" ||
+      "$SNAP_STATUS" == "FAIL" ||
       "$FLATPAK_STATUS" == "FAIL" ]]; then
 
     if preserve_logs; then
@@ -1290,22 +1193,23 @@ if [[ "$ZYPPER_STATUS" == "FAIL" ||
 
     fi
 
-    if [[ "$ZYPPER_STATUS" == "FAIL" ]]; then
+    if [[ "$APT_STATUS" == "FAIL" ]]; then
 
         echo
-        echo -e "${BOLD}[ Zypper ]${RESET}"
+        echo -e "${BOLD}[ APT ]${RESET}"
 
-        grep -E '^(Error):|^Problem:' \
-            "$ZYPPER_REFRESH_LOG" \
-            "$ZYPPER_UPGRADE_LOG" \
-            "$ZYPPER_VERIFY_LOG" \
+        grep -E '^(E:)|^dpkg: error' \
+            "$APT_UPDATE_LOG" \
+            "$APT_UPGRADE_LOG" \
+            "$APT_FIX_LOG" \
             2>/dev/null |
             tail -n 30
+    fi
 
-        # 若沒有符合前綴的錯誤行（例如 %post 失敗），至少列出 log 尾端
+    if [[ "$SNAP_STATUS" == "FAIL" ]]; then
         echo
-        echo -e "${BOLD}[ Zypper log 尾端 ]${RESET}"
-        tail -n 15 "$ZYPPER_UPGRADE_LOG" 2>/dev/null
+        echo -e "${BOLD}[ Snap ]${RESET}"
+        tail -n 30 "$SNAP_LOG" 2>/dev/null
     fi
 
     if [[ "$FLATPAK_STATUS" == "FAIL" ]]; then
@@ -1322,23 +1226,22 @@ if [[ "$ZYPPER_STATUS" == "FAIL" ||
 fi
 
 # ============================================================
-#  清理 zypper 快取（僅在成功時執行）
-#  v2.0：改用 zypper clean（只清套件快取），不再用 --all 連 metadata
-#        一起清掉，否則下次執行得重新下載全部索引。
+#  清理 apt 快取（僅在成功時執行）
 # ============================================================
 
-if [[ "$ZYPPER_STATUS" == "OK" || "$ZYPPER_STATUS" == "PARTIAL" ]]; then
+if [[ "$APT_STATUS" == "OK" || "$APT_STATUS" == "PARTIAL" ]]; then
 
     CLEAN_STARTED=$SECONDS
 
     if [[ "$DRY_RUN" == true ]]; then
-        echo -e "${CYAN}▶ [模擬] sudo zypper clean${RESET}"
-        record_step "zypper clean" "SKIP" "sudo zypper clean" "0" "模擬模式"
-    elif ensure_sudo && sudo zypper clean >/dev/null 2>&1; then
-        record_step "zypper clean" "OK" "sudo zypper clean" "$((SECONDS - CLEAN_STARTED))"
+        echo -e "${CYAN}▶ [模擬] sudo apt-get autoclean${RESET}"
+        record_step "apt autoclean" "SKIP" "sudo apt-get autoclean" "0" "模擬模式"
+    elif ensure_sudo && sudo apt-get autoclean >/dev/null 2>&1; then
+        record_step "apt autoclean" "OK" "sudo apt-get autoclean" "$((SECONDS - CLEAN_STARTED))"
     else
-        record_step "zypper clean" "WARN" "sudo zypper clean" "$((SECONDS - CLEAN_STARTED))" "清理快取失敗（不影響更新結果）"
-        add_warning "zypper clean 失敗（不影響更新結果，只是快取沒有清）"
+        # 清快取失敗不影響更新結果，但也不該完全消失
+        record_step "apt autoclean" "WARN" "sudo apt-get autoclean" "$((SECONDS - CLEAN_STARTED))" "清理快取失敗（不影響更新結果）"
+        add_warning "apt autoclean 失敗（不影響更新結果，只是快取沒有清）"
     fi
 
 fi
@@ -1351,7 +1254,7 @@ print_run_summary
 
 # ============================================================
 #  結束前等待
-#  v2.0：同時要求 stdout 是終端機，否則 ./script | tee log 還是會停下來等
+#  v2.1：同時要求 stdout 是終端機，否則 ./script | tee log 還是會停下來等
 # ============================================================
 
 pause_before_exit() {
@@ -1376,12 +1279,12 @@ if [[ "$HAD_FAILURE" == true ]]; then
     pause_before_exit
     exit 1
 
-elif [[ "$REBOOT_FORCED" == true ]]; then
+elif [[ "$APT_STATUS" == "PARTIAL" ]]; then
 
     echo
-    echo -e "${YELLOW}${BOLD}⚠ 更新已套用到新快照，請重開機使其生效。${RESET}"
+    echo -e "${YELLOW}${BOLD}⚠ 更新完成，但仍有套件被 kept back 而未升級（見上方注意事項）。${RESET}"
     pause_before_exit
-    exit 0
+    exit 1
 
 elif [[ "$DRY_RUN" == true ]]; then
 
