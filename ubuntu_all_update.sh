@@ -72,6 +72,31 @@ return 1
 
 }
 
+# --------- 執行紀錄 ----------
+# 彙整「這次跑了哪些指令、結果如何」，在腳本結束前一次列出。
+# 使用並行陣列而不是字串分隔，避免指令內容含特殊字元時解析錯誤。
+
+RUN_LABEL=()
+RUN_STATUS=()
+RUN_COMMAND=()
+RUN_SECONDS=()
+RUN_NOTE=()
+
+# 若某個步驟不是直接指令（例如包裝函式），可用這個變數指定要顯示在摘要中的指令
+RUN_CMD_LABEL=""
+
+record_step() {
+
+# $1 步驟名稱　$2 狀態(OK/FAIL/SKIP)　$3 實際指令　$4 耗時秒數　$5 補充說明(可省略)
+
+RUN_LABEL+=("$1")
+RUN_STATUS+=("$2")
+RUN_COMMAND+=("$3")
+RUN_SECONDS+=("$4")
+RUN_NOTE+=("${5:-}")
+
+}
+
 # --------- sudo 驗證 ----------
 
 echo
@@ -93,8 +118,17 @@ echo
 # --------- 修復可能殘留的未完成 dpkg 狀態 ----------
 
 echo -e "${BLUE}▶ 檢查並修復未完成的套件設定...${RESET}"
-sudo DEBIAN_FRONTEND=noninteractive LC_ALL=C dpkg --configure -a >/dev/null 2>&1
+
+DPKG_STARTED=$SECONDS
+
+if sudo DEBIAN_FRONTEND=noninteractive LC_ALL=C dpkg --configure -a >/dev/null 2>&1; then
 echo -e "${GREEN}✓ 檢查完成${RESET}"
+record_step "dpkg configure" "OK" "sudo dpkg --configure -a" "$((SECONDS - DPKG_STARTED))"
+else
+echo -e "${RED}✗ 檢查失敗（不影響後續更新）${RESET}"
+record_step "dpkg configure" "FAIL" "sudo dpkg --configure -a" "$((SECONDS - DPKG_STARTED))" "dpkg --configure -a 失敗"
+fi
+
 echo
 
 # --------- 暫存 log ----------
@@ -226,9 +260,16 @@ local title="$1"
 local logfile="$2"
 shift 2
 
+# 要顯示在執行摘要中的指令（預設就是實際執行的指令）
+local cmd_str="${RUN_CMD_LABEL:-$*}"
+RUN_CMD_LABEL=""
+
+local started=$SECONDS
+
 # 需要 sudo 的步驟，先在終端機上確認憑證，避免密碼提示被寫進 log 而卡住
 if [[ "${1:-}" == "sudo" ]] && ! ensure_sudo; then
     echo -e "${RED}✗ $title 失敗（無法取得 sudo 權限）${RESET}"
+    record_step "$title" "FAIL" "$cmd_str" "$((SECONDS - started))" "無法取得 sudo 權限"
     return 1
 fi
 
@@ -242,8 +283,10 @@ if [[ ! -t 1 ]]; then
 
     if [[ "$status" -eq 0 ]]; then
         echo -e "${GREEN}✓ $title 完成${RESET}"
+        record_step "$title" "OK" "$cmd_str" "$((SECONDS - started))"
     else
         echo -e "${RED}✗ $title 失敗${RESET}"
+        record_step "$title" "FAIL" "$cmd_str" "$((SECONDS - started))" "exit code $status"
     fi
 
     return "$status"
@@ -290,8 +333,10 @@ printf "\r\033[K"
 
 if [[ "$status" -eq 0 ]]; then
     echo -e "${GREEN}✓ $title 完成${RESET}"
+    record_step "$title" "OK" "$cmd_str" "$((SECONDS - started))"
 else
     echo -e "${RED}✗ $title 失敗${RESET}"
+    record_step "$title" "FAIL" "$cmd_str" "$((SECONDS - started))" "exit code $status"
 fi
 
 return "$status"
@@ -443,6 +488,7 @@ fi
 else
 SNAP_STATUS="NOT_INSTALLED"
 echo -e "${YELLOW}➖ Snap 未安裝，略過${RESET}"
+record_step "Snap" "SKIP" "sudo snap refresh" "0" "未安裝 snap"
 fi
 
 echo
@@ -461,6 +507,8 @@ echo -e "${BLUE}▶ 正在更新 Flatpak...${RESET}"
 echo -e "${YELLOW}  以下顯示 Flatpak 即時下載進度與速度${RESET}"
 echo
 
+FLATPAK_STARTED=$SECONDS
+
 # Flatpak 即時輸出到終端，同時保存至 log；--noninteractive 避免卡在確認提示
 flatpak update -y --noninteractive 2>&1 | tee "$FLATPAK_LOG"
 
@@ -472,15 +520,18 @@ echo
 if [[ "$FLATPAK_EXIT" -eq 0 ]]; then
     FLATPAK_STATUS="OK"
     echo -e "${GREEN}✓ Flatpak 完成${RESET}"
+    record_step "Flatpak" "OK" "flatpak update -y --noninteractive" "$((SECONDS - FLATPAK_STARTED))"
 else
     FLATPAK_STATUS="FAIL"
     WARNINGS+=("Flatpak 更新失敗")
     echo -e "${RED}✗ Flatpak 失敗${RESET}"
+    record_step "Flatpak" "FAIL" "flatpak update -y --noninteractive" "$((SECONDS - FLATPAK_STARTED))" "exit code $FLATPAK_EXIT"
 fi
 
 else
 FLATPAK_STATUS="NOT_INSTALLED"
 echo -e "${YELLOW}➖ Flatpak 未安裝，略過${RESET}"
+record_step "Flatpak" "SKIP" "flatpak update -y --noninteractive" "0" "未安裝 flatpak"
 fi
 
 # ============================================================
@@ -542,6 +593,52 @@ case "$status" in
         printf "%-10s : ${YELLOW}➖ 略過${RESET}\n" "$name"
         ;;
 esac
+
+}
+
+# ============================================================
+
+# 執行摘要（列出本次實際執行過的指令與結果）
+
+# ============================================================
+
+print_run_summary() {
+
+local i icon result
+
+(( ${#RUN_LABEL[@]} == 0 )) && return 0
+
+echo
+echo -e "${BOLD}======================================${RESET}"
+echo -e "${BOLD}           本次執行摘要${RESET}"
+echo -e "${BOLD}======================================${RESET}"
+echo
+
+for ((i=0; i<${#RUN_LABEL[@]}; i++)); do
+
+    case "${RUN_STATUS[$i]}" in
+        OK)   icon="${GREEN}✅${RESET}";  result="成功" ;;
+        FAIL) icon="${RED}❌${RESET}";    result="失敗" ;;
+        *)    icon="${YELLOW}➖${RESET}"; result="略過" ;;
+    esac
+
+    if [[ "${RUN_STATUS[$i]}" == "SKIP" ]]; then
+        printf "%b %-15s %s\n" "$icon" "${RUN_LABEL[$i]}" "$result"
+    else
+        printf "%b %-15s %s（%s 秒）\n" "$icon" "${RUN_LABEL[$i]}" "$result" "${RUN_SECONDS[$i]}"
+    fi
+
+    if [[ -n "${RUN_COMMAND[$i]}" ]]; then
+        echo -e "      ${BOLD}\$${RESET} ${RUN_COMMAND[$i]}"
+    fi
+
+    if [[ -n "${RUN_NOTE[$i]}" ]]; then
+        echo -e "      ${YELLOW}↳ ${RUN_NOTE[$i]}${RESET}"
+    fi
+
+done
+
+echo -e "${BOLD}======================================${RESET}"
 
 }
 
@@ -681,10 +778,24 @@ fi
 
 if [[ "$APT_STATUS" == "OK" ]]; then
 
+CLEAN_STARTED=$SECONDS
+
 # autoclean 本身不需確認，憑證可能已過期，先確認一次避免提示被 /dev/null 吃掉
-ensure_sudo && sudo apt-get autoclean >/dev/null 2>&1
+if ensure_sudo && sudo apt-get autoclean >/dev/null 2>&1; then
+    record_step "apt autoclean" "OK" "sudo apt-get autoclean" "$((SECONDS - CLEAN_STARTED))"
+else
+    record_step "apt autoclean" "FAIL" "sudo apt-get autoclean" "$((SECONDS - CLEAN_STARTED))" "清理快取失敗（不影響更新結果）"
+fi
 
 fi
+
+# ============================================================
+
+# 本次執行摘要
+
+# ============================================================
+
+print_run_summary
 
 # ============================================================
 
