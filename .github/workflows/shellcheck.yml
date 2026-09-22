@@ -1,0 +1,32 @@
+name: shellcheck
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lint:
+    name: Lint shell scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: bash syntax check (all scripts)
+        run: |
+          fail=0
+          for f in *.sh; do
+            echo "== bash -n $f"
+            bash -n "$f" || fail=1
+          done
+          exit $fail
+
+      - name: shellcheck (v2.0 - strict)
+        run: shellcheck -S warning ubuntu_all_update_v2.0.sh suse_all_update_v2.0.sh
+
+      # v1 保留原狀，僅供參考；suse_all_update.sh 有一個已知的
+      # SC2043（單元素 for 迴圈，無害），所以不讓它擋 CI。
+      - name: shellcheck (v1 - informational only)
+        continue-on-error: true
+        run: shellcheck -S warning ubuntu_all_update.sh suse_all_update.sh
