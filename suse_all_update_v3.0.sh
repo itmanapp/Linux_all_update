@@ -1310,6 +1310,34 @@ print_run_summary() {
 }
 
 # ============================================================
+#  清理 zypper 快取（僅在成功時執行）
+#  v2.1：改用 zypper clean（只清套件快取），不再用 --all 連 metadata
+#        一起清掉，否則下次執行得重新下載全部索引。
+# ============================================================
+
+if [[ "$ZYPPER_STATUS" == "OK" || "$ZYPPER_STATUS" == "PARTIAL" ]]; then
+
+    CLEAN_STARTED=$SECONDS
+
+    if [[ "$DRY_RUN" == true ]]; then
+        echo -e "${CYAN}▶ [模擬] sudo zypper clean${RESET}"
+        record_step "zypper clean" "SKIP" "sudo zypper clean" "0" "模擬模式"
+    elif ensure_sudo && sudo zypper clean >/dev/null 2>&1; then
+        record_step "zypper clean" "OK" "sudo zypper clean" "$((SECONDS - CLEAN_STARTED))"
+    else
+        record_step "zypper clean" "WARN" "sudo zypper clean" "$((SECONDS - CLEAN_STARTED))" "清理快取失敗（不影響更新結果）"
+        add_warning "zypper clean 失敗（不影響更新結果，只是快取沒有清）"
+    fi
+
+fi
+
+# ============================================================
+#  本次執行摘要
+# ============================================================
+
+print_run_summary
+
+# ============================================================
 #  最終結果
 # ============================================================
 
@@ -1338,27 +1366,6 @@ if [[ "$ZYPPER_STATUS" == "OK" || "$ZYPPER_STATUS" == "PARTIAL" ]]; then
         PKG_DIFF_STR="$PKG_DIFF"
     fi
     echo -e "已安裝套件數：${PKG_COUNT_BEFORE} → ${PKG_COUNT_AFTER}（${PKG_DIFF_STR}）"
-fi
-
-# --------- 本次更新的套件（一行一個，方便瀏覽） ----------
-
-echo
-echo -e "${BOLD}======================================${RESET}"
-if [[ "$DRY_RUN" == true ]]; then
-    echo -e "${BOLD}         本次預計更新的套件${RESET}"
-else
-    echo -e "${BOLD}           本次更新的套件${RESET}"
-fi
-echo -e "${BOLD}======================================${RESET}"
-echo
-
-if [[ "$PKG_UPDATED_COUNT" -gt 0 ]]; then
-    printf '%s\n' "$PKG_UPDATED_LINES"
-    echo
-    echo -e "${BOLD}共 ${PKG_UPDATED_COUNT} 個套件${RESET}"
-else
-    echo "本次無任何套件更新"
-    [[ "$PKG_DELTA_OK" == true ]] || echo -e "${YELLOW}（注意：本次無法取得套件清單，無法確認）${RESET}"
 fi
 
 # --------- 注意事項 ----------
@@ -1452,33 +1459,26 @@ if [[ "$ZYPPER_STATUS" == "FAIL" ||
 
 fi
 
-# ============================================================
-#  清理 zypper 快取（僅在成功時執行）
-#  v2.1：改用 zypper clean（只清套件快取），不再用 --all 連 metadata
-#        一起清掉，否則下次執行得重新下載全部索引。
-# ============================================================
+# --------- 本次更新的套件（一行一個，方便瀏覽） ----------
 
-if [[ "$ZYPPER_STATUS" == "OK" || "$ZYPPER_STATUS" == "PARTIAL" ]]; then
-
-    CLEAN_STARTED=$SECONDS
-
-    if [[ "$DRY_RUN" == true ]]; then
-        echo -e "${CYAN}▶ [模擬] sudo zypper clean${RESET}"
-        record_step "zypper clean" "SKIP" "sudo zypper clean" "0" "模擬模式"
-    elif ensure_sudo && sudo zypper clean >/dev/null 2>&1; then
-        record_step "zypper clean" "OK" "sudo zypper clean" "$((SECONDS - CLEAN_STARTED))"
-    else
-        record_step "zypper clean" "WARN" "sudo zypper clean" "$((SECONDS - CLEAN_STARTED))" "清理快取失敗（不影響更新結果）"
-        add_warning "zypper clean 失敗（不影響更新結果，只是快取沒有清）"
-    fi
-
+echo
+echo -e "${BOLD}======================================${RESET}"
+if [[ "$DRY_RUN" == true ]]; then
+    echo -e "${BOLD}         本次預計更新的套件${RESET}"
+else
+    echo -e "${BOLD}           本次更新的套件${RESET}"
 fi
+echo -e "${BOLD}======================================${RESET}"
+echo
 
-# ============================================================
-#  本次執行摘要
-# ============================================================
-
-print_run_summary
+if [[ "$PKG_UPDATED_COUNT" -gt 0 ]]; then
+    printf '%s\n' "$PKG_UPDATED_LINES"
+    echo
+    echo -e "${BOLD}共 ${PKG_UPDATED_COUNT} 個套件${RESET}"
+else
+    echo "本次無任何套件更新"
+    [[ "$PKG_DELTA_OK" == true ]] || echo -e "${YELLOW}（注意：本次無法取得套件清單，無法確認）${RESET}"
+fi
 
 # ============================================================
 #  結束前等待
