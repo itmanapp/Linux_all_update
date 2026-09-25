@@ -2,21 +2,33 @@
 
 Linux 系統更新腳本。一鍵完成套件庫重新整理、系統升級與 Flatpak 更新，並在需要時提醒你重新開機。
 
+> **目前建議使用 v3.0**：`ubuntu_all_update_v3.0.sh` / `suse_all_update_v3.0.sh`。
+> 它修正了 v1 的多項安全性與正確性問題（Ctrl+C 放生特權程序、held-back 誤報、
+> MicroOS 升級機制、套件鎖檢查等），並新增命令列選項，包含 `--dry-run`。
+> 詳見 **[README_v3.0.md](README_v3.0.md)**。
+>
+> 本文件其餘部分是**最初 v1 腳本**的行為說明，保留作為歷史紀錄；
+> 檔案列表與所有指令範例皆已更新為目前建議的 v3.0。
+
 ## 腳本一覽
 
 | 檔案 | 適用系統 | 套件管理 | Flatpak |
 |---|---|---|---|
-| `ubuntu_all_update.sh` | Ubuntu / Debian 系 | `apt` + `snap` | ✅ |
-| `suse_all_update.sh` | openSUSE Leap／Tumbleweed／SLE | `zypper` | ✅ |
+| **`ubuntu_all_update_v3.0.sh`** ← 建議 | Ubuntu / Debian 系 | `apt` + `snap` | ✅ |
+| **`suse_all_update_v3.0.sh`** ← 建議 | openSUSE Leap／Tumbleweed／SLE | `zypper` | ✅ |
+| `ubuntu_all_update_v2.1.sh` | Ubuntu / Debian 系 | `apt` + `snap` | ✅ |
+| `suse_all_update_v2.1.sh` | openSUSE Leap／Tumbleweed／SLE | `zypper` | ✅ |
+| `ubuntu_all_update.sh`（v1，保留） | Ubuntu / Debian 系 | `apt` + `snap` | ✅ |
+| `suse_all_update.sh`（v1，保留） | openSUSE Leap／Tumbleweed／SLE | `zypper` | ✅ |
 
 ## 使用方式
 
 ```bash
-chmod +x ubuntu_all_update.sh   # 或 suse_all_update.sh
-./ubuntu_all_update.sh
+chmod +x ubuntu_all_update_v3.0.sh   # 或 suse_all_update_v3.0.sh
+./ubuntu_all_update_v3.0.sh
 ```
 
-**請不要用 `sudo ./ubuntu_all_update.sh` 執行。** 腳本會在需要的步驟自行呼叫 `sudo`；以 root 身分執行會讓 `$HOME` 變成 `/root`，導致失敗 log 寫到錯誤位置，Flatpak 的使用者層級更新也會失效。腳本開頭有檢查，會直接拒絕執行。
+**請不要用 `sudo ./ubuntu_all_update_v3.0.sh` 執行。** 腳本會在需要的步驟自行呼叫 `sudo`；以 root 身分執行會讓 `$HOME` 變成 `/root`，導致失敗 log 寫到錯誤位置，Flatpak 的使用者層級更新也會失效。腳本開頭有檢查，會直接拒絕執行。
 
 ## ⚠️ 取得腳本的方式：請先讀過原始碼
 
@@ -24,7 +36,7 @@ chmod +x ubuntu_all_update.sh   # 或 suse_all_update.sh
 
 ```bash
 # ❌ 不建議
-curl -fsSL https://raw.githubusercontent.com/itmanapp/Linux_all_update/main/ubuntu_all_update.sh | bash
+curl -fsSL https://raw.githubusercontent.com/itmanapp/Linux_all_update/main/ubuntu_all_update_v3.0.sh | bash
 ```
 
 `curl | bash` 把「下載」和「以你的權限執行」綁在一起。這是一個**個人專案，沒有 GPG 簽章或雜湊校驗**，任何中間人攔截、CDN 被竄改或帳號被盜的情境，都可能讓你執行到被替換過的內容——而這支腳本會用到 `sudo`。
@@ -35,16 +47,16 @@ curl -fsSL https://raw.githubusercontent.com/itmanapp/Linux_all_update/main/ubun
 2. 下載到本機後再執行：
 
    ```bash
-   wget https://raw.githubusercontent.com/itmanapp/Linux_all_update/main/ubuntu_all_update.sh
-   less ubuntu_all_update.sh        # 看過再做
-   chmod +x ubuntu_all_update.sh
-   ./ubuntu_all_update.sh
+   wget https://raw.githubusercontent.com/itmanapp/Linux_all_update/main/ubuntu_all_update_v3.0.sh
+   less ubuntu_all_update_v3.0.sh   # 看過再做
+   chmod +x ubuntu_all_update_v3.0.sh
+   ./ubuntu_all_update_v3.0.sh --dry-run   # 先模擬，確認沒問題再拿掉 --dry-run
    ```
 
 3. 想更嚴謹的話，自行計算並記錄雜湊再比對：
 
    ```bash
-   sha256sum ubuntu_all_update.sh
+   sha256sum ubuntu_all_update_v3.0.sh
    ```
 
 ## 腳本會做什麼
@@ -124,5 +136,5 @@ curl -fsSL https://raw.githubusercontent.com/itmanapp/Linux_all_update/main/ubun
 ## 注意事項
 
 - 腳本需要在互動式終端機中執行（會用到 `sudo` 密碼提示與結尾的暫停）
-- 在管道或排程中執行（例如 `./ubuntu_all_update.sh | tee log`）時，進度動畫與結尾暫停會自動停用，不會卡住
+- 在管道或排程中執行（例如 `./ubuntu_all_update_v3.0.sh | tee log`）時，進度動畫與結尾暫停會自動停用，不會卡住
 - Ubuntu 版的 `NEEDRESTART_MODE=a` 只有在安裝 `needrestart` 時才有效；腳本啟動時會告訴你目前的狀態

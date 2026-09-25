@@ -22,6 +22,19 @@ jobs:
           done
           exit $fail
 
+      # 規則：README.md 的建議流程必須指向最新的版本檔名。
+      # 這是人工很容易忘記的一步（v3.0 就漏過一次），用 CI 擋下來。
+      - name: README points at the newest version
+        run: |
+          latest=$(ls ubuntu_all_update_v*.sh \
+                   | sed -E 's/^ubuntu_all_update_(v[0-9]+\.[0-9]+)\.sh$/\1/' \
+                   | sort -V | tail -1)
+          echo "偵測到最新版本：$latest"
+          if ! grep -q "ubuntu_all_update_${latest}\.sh" README.md; then
+            echo "::error::README.md 的建議流程沒有指向最新版本 ubuntu_all_update_${latest}.sh"
+            exit 1
+          fi
+
       - name: shellcheck (v3.0 - strict)
         run: shellcheck -S warning ubuntu_all_update_v3.0.sh suse_all_update_v3.0.sh
 
