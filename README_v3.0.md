@@ -71,6 +71,34 @@ v3.0 是 v2.1 加上一項功能，更新邏輯本身不變。
 - 套件快照若無法取得（例如 `dpkg-query` 不存在），會顯示
   「本次無任何套件更新」並附註無法確認，而不是默默假裝沒有異動。
 
+### 5. Flatpak 步驟不再看起來卡住（v3.0.1）
+
+回報的症狀是「更新本身正常，但常常卡在『無事可做。』」，而且腳本承諾的即時下載進度從來沒出現過。原因有兩個，而且**只有 Flatpak 這一步會這樣**：
+
+1. **`flatpak` 只有在 stdout 是終端機時才會畫下載進度與速度。** 原本的寫法是 `flatpak update ... 2>&1 | tee "$FLATPAK_LOG"`，`| tee` 讓 stdout 變成管線，flatpak 因此完全安靜——但畫面上還印著「以下顯示 Flatpak 即時下載進度與速度」，等於承諾了一個不可能出現的東西。
+2. **flatpak 每次會先向遠端抓取 summary。** 用 `flatpak remote-ls --updates -v` 可以看到它實際在做什麼：
+
+   ```
+   F: Fetching summary index file for remote 'flathub'
+   F: Loading https://dl.flathub.org/repo/summary.idx using curl
+   F: Received 10001 bytes
+   F: Loading https://dl.flathub.org/repo/summaries/7d964961...idx.sig using curl
+   ```
+
+   appstream 的 TTL 預設是 **86400 秒（24 小時）**，所以大約每天會有一次執行停在這些 HTTPS 抓取上，而這整段**一個字都不會印**。
+
+其他步驟（`apt`／`snap`／`zypper`）都走 `run_with_progress` 的進度條，所以只有 Flatpak 這一步會這樣。
+
+修正內容：
+
+- **優先給 flatpak 一個 pty**（util-linux 的 `script -qec`），它才會顯示真正的下載進度與速度，同時輸出仍寫進 log。使用前會先**實際探測** pty 能不能建立，不能就退回下一種模式——避免把「pty 開不起來」誤報成「flatpak 更新失敗」。
+- **沒有 pty 時退回等待計時**，畫面持續顯示「已等待 N 秒」，不會完全沒有動靜。
+- **新增 `--flatpak-timeout SECONDS`**（預設 1800，`0` = 不限制），真的卡死時強制中止並回報，而不是無限等待。
+- **執行前先說明**「這段時間沒有輸出是正常的」。
+- **沒有更新時明確說出來**：偵測到 flatpak 只印了 `Nothing to do.`／「無事可做。」時，記錄為「略過：沒有可用的更新」，而不是讓人以為它什麼都沒做就結束了。
+- **模擬模式的失敗改記為警告**：`flatpak remote-ls` 在模擬模式下失敗多半只是環境限制（例如快取不可寫），不再顯示成 ❌ 失敗。
+- pty 模式下 log 會含有 ANSI 控制碼與 `\r`，顯示錯誤資訊前會先濾掉。
+
 ## 版本沿革
 
 | 版本 | 內容 |
@@ -79,6 +107,7 @@ v3.0 是 v2.1 加上一項功能，更新邏輯本身不變。
 | v2.0 | 修正多項安全性與正確性問題（Ctrl+C 放生特權程序、held-back 誤報、MicroOS 升級機制、zypper 106、鎖檢查 fail-open 等），並新增命令列選項 |
 | v2.1 | 相對 v2.0 只改兩處：磁碟空間確認改為 fail-closed、套件鎖狀態先確認 sudo 憑證再判定 |
 | v3.0 | 相對 v2.1 新增「本次更新的套件」清單，並修正上述兩個模擬模式問題 |
+| v3.0.1 | 修正 Flatpak 步驟看起來卡住（即時進度、等待計時、逾時保護、沒有更新時明確說明） |
 
 ### v2.1 的變更（相對 v2.0）
 
@@ -106,6 +135,7 @@ chmod +x ubuntu_all_update_v3.0.sh     # 或 suse_all_update_v3.0.sh
 | `--only LIST` | 只執行指定項目：`apt,snap,flatpak,all`（Ubuntu）／`zypper,flatpak,all`（SUSE） |
 | `-y`, `--yes` | 不等待結尾的「按 Enter」 |
 | `--keep-logs N` | 保留最近 N 份失敗 log（預設 10） |
+| `--flatpak-timeout SECONDS` | Flatpak 步驟逾時秒數（預設 1800，`0` = 不限制）（v3.0.1 新增） |
 | `--no-color` | 關閉顏色 |
 | `--version` | 顯示版本 |
 
