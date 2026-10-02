@@ -10,13 +10,15 @@
 #  v2.1 相對 v2.0 只修兩處：磁碟空間不足時的確認改為 fail-closed、
 #  套件鎖狀態先確認 sudo 憑證後再判定。
 #
+#  v2.1.1 修正：Flatpak 步驟常常看起來卡住（原因與做法見 README_v2.1.md）。
+#
 #  請勿以 sudo 執行本腳本。
 # ============================================================
 
 set -u
 set -o pipefail
 
-VERSION="2.1"
+VERSION="2.1.1"
 
 # --------- PATH 強化 ----------
 # 不信任呼叫者的 PATH：把系統目錄放在最前面，避免有人把假的 sudo／apt
@@ -34,6 +36,7 @@ DRY_RUN=false
 ASSUME_YES=false
 NO_COLOR="${NO_COLOR:-}"
 KEEP_LOGS=10
+FLATPAK_TIMEOUT=1800
 ONLY_RAW=""
 ONLY_APT=true
 ONLY_SNAP=true
@@ -54,6 +57,8 @@ ubuntu_all_update_v2.1.sh — Ubuntu / Debian 系統更新腳本
                        （預設 all）
   -y, --yes           不等待結尾的「按 Enter」
       --keep-logs N   保留最近 N 份失敗 log（預設 10）
+      --flatpak-timeout SECONDS
+                      Flatpak 步驟的逾時秒數（預設 1800，0 = 不限制）
       --no-color      關閉顏色輸出
       --version       顯示版本並結束
 
@@ -103,6 +108,14 @@ while [[ $# -gt 0 ]]; do
             KEEP_LOGS="$2"
             shift 2
             ;;
+        --flatpak-timeout)
+            if [[ $# -lt 2 ]]; then
+                echo "錯誤：--flatpak-timeout 需要一個數字（秒，0 = 不限制）。" >&2
+                exit 2
+            fi
+            FLATPAK_TIMEOUT="$2"
+            shift 2
+            ;;
         --only)
             if [[ $# -lt 2 ]]; then
                 echo "錯誤：--only 需要一個清單。" >&2
@@ -121,6 +134,11 @@ done
 
 if ! [[ "$KEEP_LOGS" =~ ^[0-9]+$ ]]; then
     echo "錯誤：--keep-logs 必須是數字，收到「$KEEP_LOGS」。" >&2
+    exit 2
+fi
+
+if ! [[ "$FLATPAK_TIMEOUT" =~ ^[0-9]+$ ]]; then
+    echo "錯誤：--flatpak-timeout 必須是數字，收到「$FLATPAK_TIMEOUT」。" >&2
     exit 2
 fi
 
@@ -539,6 +557,91 @@ run_with_progress() {
     fi
 
     return "$status"
+}
+
+
+# --------- Flatpak 專用執行器 ----------
+#
+# 為什麼只有 Flatpak 需要特別處理：
+#   flatpak 只有在 stdout 是終端機時才會畫下載進度與速度。原本的寫法
+#   `flatpak update ... | tee log` 讓 stdout 變成管線，flatpak 因此完全
+#   安靜；而它每次又可能先向遠端抓取 appstream／summary（TTL 預設 86400
+#   秒，約一天一次），那段期間一個字都不會印 —— 畫面看起來就像當掉。
+#   其他步驟都走 run_with_progress 的進度條，所以只有這一步會這樣。
+#
+# 處理方式：
+#   1. 有 script(1) 時用它配置一個 pty，flatpak 才會顯示即時進度，
+#      輸出同時寫進 log。
+#   2. 沒有 pty 時退回等待計時，至少讓畫面有動作。
+#   3. 兩種模式都套用逾時，避免真的卡死。
+
+strip_ansi() {
+    sed -e 's/\x1b\[[0-9;?]*[A-Za-z]//g' \
+        -e 's/\x1b\][^\x07]*\x07//g' \
+        -e 's/\r/\n/g'
+}
+
+flatpak_run() {
+
+    local timeout_s="$1"
+    local logfile="$2"
+    local pid rc elapsed
+    local use_pty=false
+
+    # 先實際確認 script(1) 能在這個環境建立 pty。如果直接假設它可用，
+    # 在不能開 pty 的環境（容器、受限的工作階段）script 會立刻失敗，
+    # flatpak 根本沒跑，卻被回報成「更新失敗」。
+    if [[ -t 1 ]] && command -v script >/dev/null 2>&1; then
+        local probe="$LOG_DIR/.pty-probe"
+        if script -qec "true" "$probe" >/dev/null 2>&1; then
+            use_pty=true
+        fi
+        rm -f -- "$probe" 2>/dev/null
+    fi
+
+    if [[ "$use_pty" == true ]]; then
+        script -qec "flatpak update -y --noninteractive" "$logfile" &
+        pid=$!
+    else
+        echo -e "${YELLOW}  （此環境無法顯示 flatpak 的即時進度，改以等待計時顯示）${RESET}"
+        flatpak update -y --noninteractive >"$logfile" 2>&1 &
+        pid=$!
+    fi
+
+    CHILD_PID="$pid"
+
+    while kill -0 "$pid" 2>/dev/null; do
+
+        elapsed=$((SECONDS - FLATPAK_STARTED))
+
+        if [[ "$timeout_s" -gt 0 && "$elapsed" -ge "$timeout_s" ]]; then
+
+            echo
+            echo -e "${RED}⚠ Flatpak 超過 ${timeout_s} 秒仍未結束，強制中止。${RESET}"
+
+            kill -TERM "$pid" 2>/dev/null
+            sleep 2
+            kill -KILL "$pid" 2>/dev/null
+            wait "$pid" 2>/dev/null
+
+            CHILD_PID=""
+            return 124
+        fi
+
+        if [[ "$use_pty" != true ]]; then
+            printf "\r${CYAN}▶ Flatpak 執行中... 已等待 %d 秒${RESET}" "$elapsed"
+        fi
+
+        sleep 1
+    done
+
+    [[ "$use_pty" == true ]] || printf "\r\033[K"
+
+    wait "$pid"
+    rc=$?
+    CHILD_PID=""
+
+    return "$rc"
 }
 
 # ============================================================
@@ -966,6 +1069,7 @@ elif ! command -v flatpak >/dev/null 2>&1; then
 else
 
     FLATPAK_STARTED=$SECONDS
+    _fp_note=""
 
     if [[ "$DRY_RUN" == true ]]; then
 
@@ -974,14 +1078,22 @@ else
         FLATPAK_EXIT=${PIPESTATUS[0]}
         _fp_cmd="flatpak remote-ls --updates"
 
+        if [[ "$FLATPAK_EXIT" -ne 0 ]]; then
+            # 模擬模式下這通常只是環境限制（例如快取不可寫），不代表真的會失敗
+            echo -e "${YELLOW}  無法取得更新清單（模擬模式，多為環境限制）${RESET}"
+            _fp_note="模擬模式：無法取得更新清單（多為環境限制）"
+            FLATPAK_EXIT=0
+        fi
+
     else
 
         echo -e "${BLUE}▶ 正在更新 Flatpak...${RESET}"
-        echo -e "${YELLOW}  以下顯示 Flatpak 即時下載進度與速度${RESET}"
+        echo -e "${YELLOW}  flatpak 可能先向遠端抓取索引（TTL 預設 24 小時），${RESET}"
+        echo -e "${YELLOW}  這段期間完全沒有輸出是正常的，不是當掉。${RESET}"
         echo
 
-        flatpak update -y --noninteractive 2>&1 | tee "$FLATPAK_LOG"
-        FLATPAK_EXIT=${PIPESTATUS[0]}
+        flatpak_run "$FLATPAK_TIMEOUT" "$FLATPAK_LOG"
+        FLATPAK_EXIT=$?
         _fp_cmd="flatpak update -y --noninteractive"
 
     fi
@@ -989,9 +1101,28 @@ else
     echo
 
     if [[ "$FLATPAK_EXIT" -eq 0 ]]; then
+
         FLATPAK_STATUS="OK"
         echo -e "${GREEN}✓ Flatpak 完成${RESET}"
-        record_step "Flatpak" "OK" "$_fp_cmd" "$((SECONDS - FLATPAK_STARTED))"
+
+        # flatpak 在沒有更新時只會印一行 "Nothing to do."／「無事可做。」。
+        # 明確講出來，以免使用者以為它什麼都沒做就結束了。
+        if grep -qEi 'nothing to do|無事可做' "$FLATPAK_LOG" 2>/dev/null; then
+            echo -e "${YELLOW}  （目前沒有可用的 Flatpak 更新）${RESET}"
+            record_step "Flatpak" "SKIP" "$_fp_cmd" "$((SECONDS - FLATPAK_STARTED))" "沒有可用的更新"
+        elif [[ -n "$_fp_note" ]]; then
+            record_step "Flatpak" "WARN" "$_fp_cmd" "$((SECONDS - FLATPAK_STARTED))" "$_fp_note"
+        else
+            record_step "Flatpak" "OK" "$_fp_cmd" "$((SECONDS - FLATPAK_STARTED))"
+        fi
+
+    elif [[ "$FLATPAK_EXIT" -eq 124 ]]; then
+
+        FLATPAK_STATUS="FAIL"
+        add_warning "Flatpak 超過 ${FLATPAK_TIMEOUT} 秒仍未完成，已強制中止（可用 --flatpak-timeout 調整，0 = 不限制）"
+        echo -e "${RED}✗ Flatpak 逾時中止${RESET}"
+        record_step "Flatpak" "FAIL" "$_fp_cmd" "$((SECONDS - FLATPAK_STARTED))" "逾時 ${FLATPAK_TIMEOUT} 秒"
+
     else
         FLATPAK_STATUS="FAIL"
         add_warning "Flatpak 更新失敗"
@@ -1215,7 +1346,8 @@ if [[ "$APT_STATUS" == "FAIL" ||
     if [[ "$FLATPAK_STATUS" == "FAIL" ]]; then
         echo
         echo -e "${BOLD}[ Flatpak ]${RESET}"
-        tail -n 30 "$FLATPAK_LOG" 2>/dev/null
+        # pty 模式會在 log 留下 ANSI 控制碼與 \r，顯示前先濾掉
+        strip_ansi < "$FLATPAK_LOG" 2>/dev/null | tail -n 30
     fi
 
     if [[ "$LOG_PRESERVED" == true ]]; then

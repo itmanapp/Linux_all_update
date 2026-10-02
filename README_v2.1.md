@@ -18,6 +18,35 @@ v2.1 是 v2.0 的修正版，只動兩處，其餘不變：
 | 1 | 磁碟空間不足時的確認 | 非互動（cron／systemd timer／stdin 被重導向）且沒有 `-y` 時，`-t 0` 不成立 → 既不詢問也不中止，直接在磁碟偏低的狀況下繼續升級（fail-open） | 改為 fail-closed：非互動且沒有 `-y` 一律 `exit 1`；只有 `-y` 才視為使用者明確同意 |
 | 2 | 套件鎖狀態判定 | `sudo -n` 憑證過期時回傳 1，與 `fuser` 回報「沒有任何程序持有」的 1 折在同一分支，於是「無法判定」永遠不會觸發 | 函式開頭先單獨執行 `sudo -n true` 確認憑證，失敗即回傳 2（無法判定），交由外層 `ensure_sudo` 重新驗證後再判斷 |
 
+## v2.1.1 的變更（相對 v2.1）
+
+只修一處：**Flatpak 步驟常常看起來卡住**。
+
+回報的症狀是「更新本身正常，但常常卡在『無事可做。』」，而且腳本承諾的即時下載進度從來沒出現過。原因有兩個，而且**只有 Flatpak 這一步會這樣**：
+
+1. **`flatpak` 只有在 stdout 是終端機時才會畫下載進度與速度。** 原本的寫法是 `flatpak update ... 2>&1 | tee "$FLATPAK_LOG"`，`| tee` 讓 stdout 變成管線，flatpak 因此完全安靜——但畫面上還印著「以下顯示 Flatpak 即時下載進度與速度」，等於承諾了一個不可能出現的東西。
+2. **flatpak 每次會先向遠端抓取 summary。** 用 `flatpak remote-ls --updates -v` 可以看到它實際在做什麼：
+
+   ```
+   F: Fetching summary index file for remote 'flathub'
+   F: Loading https://dl.flathub.org/repo/summary.idx using curl
+   F: Loading https://dl.flathub.org/repo/summaries/7d964961...idx.sig using curl
+   ```
+
+   appstream 的 TTL 預設是 **86400 秒（24 小時）**，所以大約每天會有一次執行停在這些 HTTPS 抓取上，而這整段**一個字都不會印**。
+
+其他步驟（`apt`／`snap`／`zypper`）都走 `run_with_progress` 的進度條，所以只有 Flatpak 這一步會這樣。
+
+修正內容：
+
+- 優先給 flatpak 一個 **pty**（util-linux 的 `script -qec`），它才會顯示真正的下載進度與速度，同時輸出仍寫進 log。使用前會先**實際探測** pty 能不能建立，不能就退回下一種模式——避免把「pty 開不起來」誤報成「flatpak 更新失敗」。
+- 沒有 pty 時退回**等待計時**，畫面持續顯示「已等待 N 秒」，不會完全沒有動靜。
+- 新增 `--flatpak-timeout SECONDS`（預設 1800，`0` = 不限制），真的卡死時強制中止並回報。
+- 執行前先說明「這段時間沒有輸出是正常的」。
+- 偵測到 `Nothing to do.`／「無事可做。」時，記錄為「略過：沒有可用的更新」，而不是讓人以為它什麼都沒做就結束了。
+- 模擬模式下 `flatpak remote-ls` 失敗改記為警告，不再顯示成 ❌ 失敗。
+- pty 模式下 log 會含有 ANSI 控制碼與 `\r`，顯示錯誤資訊前會先濾掉。
+
 ## 快速開始
 
 ```bash
@@ -37,6 +66,7 @@ chmod +x ubuntu_all_update_v2.1.sh     # 或 suse_all_update_v2.1.sh
 | `--only LIST` | 只執行指定項目：`apt,snap,flatpak,all`（Ubuntu）／`zypper,flatpak,all`（SUSE） |
 | `-y`, `--yes` | 不等待結尾的「按 Enter」 |
 | `--keep-logs N` | 保留最近 N 份失敗 log（預設 10） |
+| `--flatpak-timeout SECONDS` | Flatpak 步驟逾時秒數（預設 1800，`0` = 不限制）（v2.1.1 新增） |
 | `--no-color` | 關閉顏色 |
 | `--version` | 顯示版本 |
 
